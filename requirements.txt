@@ -12,4 +12,3 @@ pandas
 scikit-learn
 requests
 textstat
-llama
