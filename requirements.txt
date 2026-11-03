@@ -1,0 +1,13 @@
+# Python 3.10-3.12. mediapipe 0.10.14 is pinned because newer releases removed the mp.solutions API used here.
+streamlit==1.40.2
+streamlit-webrtc==0.47.9
+streamlit-autorefresh
+mediapipe==0.10.14
+protobuf<5
+opencv-python-headless
+av
+numpy
+pandas
+scikit-learn
+requests
+textstat
