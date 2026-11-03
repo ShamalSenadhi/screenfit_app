@@ -3,6 +3,7 @@ streamlit==1.40.2
 streamlit-webrtc==0.47.9
 streamlit-autorefresh
 mediapipe==0.10.14
+ollama llama3.1:8b
 protobuf<5
 opencv-python-headless
 av
