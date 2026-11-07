@@ -232,4 +232,3 @@ if S.stage != "run":
     _ok, _ms, _ = ollama_status(); st.sidebar.caption("Llama: " + (f"✅ {S.model}" if _ok and _ms else "❌ not ready — open Setup (Ollama)"))
 if mode != "Candidate interview" and S.stage in ("camera", "run"): st.sidebar.warning("An interview is in progress.")
 {"Candidate interview": candidate, "Item bank (admin)": admin, "Recruiter dashboard": recruiter, "Setup (Ollama)": setup}[mode]()
-
