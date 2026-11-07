@@ -3,12 +3,17 @@ streamlit==1.40.2
 streamlit-webrtc==0.47.9
 streamlit-autorefresh
 mediapipe==0.10.14
-ollama 
 protobuf<5
 opencv-python-headless
 av
 numpy
 pandas
 scikit-learn
-requests
 textstat
+# Llama via Hugging Face (model downloads automatically on first load)
+torch
+transformers>=4.45
+accelerate
+huggingface_hub
+bitsandbytes; sys_platform != "darwin"   # optional 4-bit loading on NVIDIA GPUs
+
