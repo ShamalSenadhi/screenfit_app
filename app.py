@@ -1,4 +1,4 @@
-"""ScreenFit - LLM interview (Ollama/Llama) + webcam eye screening. Run:  streamlit run app.py"""
+"""ScreenFit - LLM interview (Llama via Hugging Face) + webcam eye screening. Run:  streamlit run app.py"""
 import os, glob, json, time, random, uuid
 import numpy as np, pandas as pd, streamlit as st
 from concurrent.futures import ThreadPoolExecutor
@@ -15,14 +15,6 @@ NEUTRAL = ("Please read this neutral text silently at your normal pace. Rivers c
            "fast water, summer slows it, and autumn leaves gather along the banks. Keep your head still and your eyes on the screen.")
 os.makedirs("data/sessions", exist_ok=True)
 S.setdefault("stage", "pre"); S.setdefault("model", llm.MODEL)
-import shutil, subprocess
-
-def ollama_status(force=False):
-    """(running, models, detail); cached for 10 s so reruns stay fast."""
-    c = S.get("_ol")
-    if force or not c or time.time() - c[0] > 10:
-        c = (time.time(),) + llm.ping(S.get("host") or None); S["_ol"] = c
-    return c[1:]
 
 
 def build_steps(items):
@@ -83,6 +75,10 @@ def candidate():
             if not ok: st.error("Consent is required."); return
             S.update(meta=dict(level=level, glasses=glasses, screen_hours=hrs, cvsq=cvsq, osdi=osdi), qs=items, seed=seed, sid=uuid.uuid4().hex[:8], stage="camera"); st.rerun()
     elif S.stage == "camera":
+        if not llm.is_loaded(S.model):
+            with st.spinner("Loading Llama for grading (first use downloads it automatically; please wait)…"):
+                try: llm.load(S.model)
+                except Exception as e: st.error(f"Could not load the model: {e}. Open **Model setup (Llama)** (token, licence, GPU memory)."); return
         ctx, proc = cam(); st_autorefresh(1500, key="camtick")
         st.subheader("Camera check"); st.write("Click **START** in the sidebar, allow the camera, face the screen with front lighting, and sit about 60 cm away.")
         ok = False
@@ -139,60 +135,40 @@ def run(proc):
         st.rerun()
 
 
-# ------------------------------------------------------------------ setup / diagnostics
+# ------------------------------------------------------------------ model setup / diagnostics
+PRESETS = ["meta-llama/Llama-3.2-11B-Vision-Instruct", "meta-llama/Llama-3.2-3B-Instruct", "meta-llama/Llama-3.2-1B-Instruct"]
+
 def setup():
-    st.title("🛠️ Setup · Ollama (Llama)")
-    st.caption("Llama runs locally through Ollama. Work down the three checks; each one explains how to fix itself.")
-    S.host = st.text_input("Ollama address", S.get("host", llm.HOST), help="Default http://localhost:11434. Try http://127.0.0.1:11434 if localhost fails.")
-    llm.HOST = S.host.rstrip("/")
-    ok, ms, detail = ollama_status(force=st.button("🔄 Re-check"))
-    c = st.columns(3)
-    c[0].metric("1 · Ollama running", "✅ yes" if ok else "❌ no"); c[1].metric("2 · Model installed", f"✅ {len(ms)}" if ms else "❌ none"); c[2].metric("3 · Llama test", S.get("_test", "not run"))
-    if ok: st.success(f"Connected to {detail}")
-    else:
-        st.error(f"Cannot reach Ollama ({detail[:120]})")
-        if shutil.which("ollama"):
-            st.write("Ollama is installed on this computer but not running.")
-            if st.button("▶ Start Ollama server"):
-                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); time.sleep(4); ollama_status(True); st.rerun()
-        else:
-            st.warning("The `ollama` command was not found. Install Ollama, then reopen this page and click Re-check.")
-            st.link_button("Download Ollama", "https://ollama.com/download")
-        with st.expander("Other fixes"):
-            st.markdown("- Open http://localhost:11434 in a browser: it should say *Ollama is running*.\n- If `localhost` fails, set the address above to `http://127.0.0.1:11434`.\n"
-                        "- Turn off VPN/proxy for localhost, and allow port 11434 in the firewall.\n- If Streamlit runs in WSL or Docker, use the Windows host address (for example `http://host.docker.internal:11434`).")
-    st.divider(); st.subheader("Download a model")
-    pick = st.selectbox("Model", ["llama3.1:8b (best, ~4.7 GB, 8 GB RAM)", "llama3.2:3b (smaller, ~2 GB)", "llama3.2:1b (tiny, testing only)", "other…"])
-    name = st.text_input("Model name", "") if pick.startswith("other") else pick.split(" ")[0]
-    if st.button("⬇ Download model", disabled=not (ok and name)):
-        bar = st.progress(0.0, text="Starting…"); last = 0.0
-        try:
-            for ev in llm.pull(name):
-                if ev.get("error"): st.error(ev["error"]); break
-                if ev.get("total"): last = min(1.0, ev.get("completed", 0) / ev["total"]); bar.progress(last, text=f"{ev.get('status', '')} {ev.get('completed', 0) / 1e9:.2f} / {ev['total'] / 1e9:.2f} GB")
-                else: bar.progress(last, text=ev.get("status", ""))
-            else: st.success(f"{name} is ready."); ollama_status(True)
-        except Exception as e: st.error(f"Download failed: {e}")
-    if ms:
-        S.model = st.selectbox("Model used by the app", ms, index=ms.index(S.model) if S.model in ms else 0, key="setup_model")
-        st.divider(); st.subheader("Test Llama")
-        c1, c2 = st.columns(2)
-        if c1.button("Run JSON test"):
-            with st.spinner("Asking Llama…"):
-                try: r = llm.ask("Reply with JSON only.", 'Return {"ok": true, "reply": "hello"}', 0, S.model); S["_test"] = "✅ works"; st.json(r)
-                except Exception as e: S["_test"] = "❌ failed"; st.error(f"Test failed: {e}")
-        if c2.button("Generate one sample item"):
-            with st.spinner("Generating (can take up to a minute)…"):
-                it = bank.make_item("REST API design", "Data and APIs", S.model)
-            if it: st.success(f"Valid item generated ({it['words']} words)"); st.write(it["paragraph"]); st.json(it["questions"])
-            else: st.error("The model did not return a valid item after 3 tries. Try a larger model (llama3.1:8b).")
+    st.title("🛠️ Model setup · Llama (Hugging Face)")
+    st.caption("The model downloads **automatically** the first time it is loaded (progress appears in the terminal where Streamlit runs). There is no download button.")
+    labels = ["Llama-3.2-11B-Vision-Instruct (vision; GPU, ~10 GB VRAM in 4-bit)", "Llama-3.2-3B-Instruct (text; light)", "Llama-3.2-1B-Instruct (text; testing only)", "other…"]
+    pick = st.selectbox("Model", labels, index=PRESETS.index(S.model) if S.model in PRESETS else 3)
+    S.model = ("meta-llama/" + pick.split(" ")[0]) if not pick.startswith("other") else (st.text_input("Hugging Face model id", S.model).strip() or llm.MODEL)
+    tok = st.text_input("Hugging Face access token (Llama is gated: accept the licence on the model page first)", value=os.getenv("HF_TOKEN", ""), type="password")
+    if tok: os.environ["HF_TOKEN"] = tok.strip()
+    s = llm.status(S.model); c = st.columns(5)
+    c[0].metric("Libraries", "✅" if s["libs"] else "❌"); c[1].metric("GPU", f"✅ {s['vram_gb']} GB" if s["cuda"] else "none (CPU)")
+    c[2].metric("HF token", "✅" if s["token"] else "❌"); c[3].metric("Cached on disk", "✅" if s["cached"] else "not yet"); c[4].metric("Loaded", "✅" if s["loaded"] else "no")
+    if not s["libs"]: st.error("Install the libraries:  pip install torch transformers accelerate bitsandbytes huggingface_hub  (then restart the app)")
+    if "vision" in S.model.lower() and not s["cuda"]: st.warning("Llama 3.2 Vision (11B) is far too slow on CPU. Use a CUDA GPU, or choose Llama-3.2-3B-Instruct.")
+    st.info("Llama models are gated: open the model page on huggingface.co, accept the licence, create a read token and paste it above (or set HF_TOKEN). The first load downloads the weights once; later runs use the cache.")
+    c1, c2 = st.columns(2)
+    if c1.button("Load model and run JSON test", disabled=not s["libs"]):
+        with st.spinner("Loading the model (first use downloads it automatically; this can take a long time)…"):
+            try: r = llm.ask("Reply with JSON only.", 'Return {"ok": true, "reply": "hello"}', 0, S.model, max_new=40); S["_test"] = "ok"; st.success("Model works."); st.json(r)
+            except Exception as e: st.error(f"Failed: {e}")
+    if c2.button("Generate one sample item", disabled=not s["libs"]):
+        with st.spinner("Generating…"): it = bank.make_item("REST API design", "Data and APIs", S.model)
+        if it: st.success(f"Valid item generated ({it['words']} words)"); st.write(it["paragraph"]); st.json(it["questions"])
+        else: st.error("No valid item after 3 tries. Try a larger model or generate again.")
 
 # ------------------------------------------------------------------ admin
 def admin():
     st.title("🗂️ Item bank (admin)")
-    ok, ms, _ = ollama_status()
-    if ok and ms: st.success(f"Ollama reachable · models: {', '.join(ms)}"); S.model = st.selectbox("Model", ms, index=ms.index(S.model) if S.model in ms else 0)
-    else: st.error("Ollama is not ready (not running, or no model downloaded). Open **Setup (Ollama)** in the sidebar and follow the steps there."); ms = []
+    s = llm.status(S.model)
+    st.info(f"Model: `{S.model}` · cached: {'yes' if s['cached'] else 'no (downloads automatically on first use)'} · loaded: {'yes' if s['loaded'] else 'no'}. Change it in **Model setup (Llama)**.")
+    ms = [S.model] if s["libs"] else []
+    if not s["libs"]: st.error("PyTorch/transformers are not installed. See **Model setup (Llama)**.")
     b = bank.load(); cov = bank.coverage(b); st.write("**Approved items per cluster**"); st.bar_chart(pd.Series(cov, name="approved"))
     with st.expander("Generate new items with Llama", expanded=not b):
         cl = st.multiselect("Clusters", list(bank.CLUSTERS), default=list(bank.CLUSTERS)); n = st.slider("Items per area", 1, 5, 1)
@@ -227,8 +203,7 @@ def recruiter():
     st.dataframe(tab, hide_index=True, use_container_width=True)
     sel = st.selectbox("Open candidate session", tab.session); st.divider(); report.render(next(r for r in reps if r["sid"] == sel))
 
-mode = st.sidebar.radio("Mode", ["Candidate interview", "Item bank (admin)", "Recruiter dashboard", "Setup (Ollama)"])
-if S.stage != "run":
-    _ok, _ms, _ = ollama_status(); st.sidebar.caption("Llama: " + (f"✅ {S.model}" if _ok and _ms else "❌ not ready — open Setup (Ollama)"))
+mode = st.sidebar.radio("Mode", ["Candidate interview", "Item bank (admin)", "Recruiter dashboard", "Model setup (Llama)"])
+if S.stage != "run": st.sidebar.caption(f"Llama: {S.model.split('/')[-1]} · " + ("✅ loaded" if llm.is_loaded(S.model) else "loads on first use"))
 if mode != "Candidate interview" and S.stage in ("camera", "run"): st.sidebar.warning("An interview is in progress.")
-{"Candidate interview": candidate, "Item bank (admin)": admin, "Recruiter dashboard": recruiter, "Setup (Ollama)": setup}[mode]()
+{"Candidate interview": candidate, "Item bank (admin)": admin, "Recruiter dashboard": recruiter, "Model setup (Llama)": setup}[mode]()
