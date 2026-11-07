@@ -1,4 +1,4 @@
-"""ScreenFit - LLM interview (Llama via Hugging Face) + webcam eye screening. Run:  streamlit run app.py"""
+"""ScreenFit - LLM interview (Llama via hosted API) + webcam eye screening. Run:  streamlit run app.py"""
 import os, glob, json, time, random, uuid
 import numpy as np, pandas as pd, streamlit as st
 from concurrent.futures import ThreadPoolExecutor
@@ -6,8 +6,22 @@ from streamlit_autorefresh import st_autorefresh
 import bank, llm, features, report
 
 st.set_page_config(page_title="ScreenFit", page_icon="👁️", layout="wide")
+for _m, _n in ((bank, "make_item"), (llm, "ask"), (features, "compute"), (report, "build")):
+    if not hasattr(_m, _n): st.error(f"`{_m.__name__}.py` has the wrong content (missing `{_n}`). Re-copy it from the project zip."); st.stop()
 S = st.session_state
-RTC = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+def get_rtc():
+    """STUN by default. On Streamlit Cloud add TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN secrets for a TURN server (more reliable)."""
+    c = S.get("_rtc")
+    if c and time.time() - c[0] < 3000: return c[1]
+    cfg = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+    sid, tok = os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN")
+    if sid and tok:
+        try:
+            import requests
+            r = requests.post(f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Tokens.json", auth=(sid, tok), timeout=10); r.raise_for_status()
+            cfg = {"iceServers": r.json()["ice_servers"]}
+        except Exception: pass
+    S["_rtc"] = (time.time(), cfg); return cfg
 GRID = [(x, y) for y in (0.1, 0.5, 0.9) for x in (0.1, 0.5, 0.9)]
 TOTAL = 1200; READ_S = 35; QDUR = {"mcq": 20, "tf": 20, "short": 35}
 NEUTRAL = ("Please read this neutral text silently at your normal pace. Rivers carry water from high ground to the sea. "
@@ -41,7 +55,7 @@ def cam():
     import eyes
     with st.sidebar:
         st.markdown("### Webcam (processed locally)")
-        ctx = webrtc_streamer(key="eye", video_processor_factory=eyes.EyeProcessor, rtc_configuration=RTC,
+        ctx = webrtc_streamer(key="eye", video_processor_factory=eyes.EyeProcessor, rtc_configuration=get_rtc(),
                               media_stream_constraints={"video": {"width": 480, "height": 360}, "audio": False})
     return ctx, ctx.video_processor
 
@@ -62,7 +76,7 @@ def candidate():
     if S.stage == "pre":
         st.subheader("Pre-session form (not counted in the 20 minutes)")
         with st.form("pre_form"):
-            ok = st.checkbox("I have read the information sheet and agree to take part. My webcam is analysed on this device; no video is stored; this is not a medical diagnosis; I may withdraw at any time.")
+            ok = st.checkbox("I have read the information sheet and agree to take part. My webcam video is analysed in memory by this application (on this computer, or on the hosting server if the app is online); no video is stored; this is not a medical diagnosis; I may withdraw at any time.")
             c1, c2, c3 = st.columns(3)
             level = c1.selectbox("Role level", ["Junior", "Mid-level", "Senior"]); glasses = c2.checkbox("I wear glasses"); hrs = c3.number_input("Screen hours per day", 0.0, 16.0, 8.0, 0.5)
             st.markdown("Complete the official **CVS-Q** and **OSDI** questionnaires and enter your total scores:")
@@ -75,10 +89,7 @@ def candidate():
             if not ok: st.error("Consent is required."); return
             S.update(meta=dict(level=level, glasses=glasses, screen_hours=hrs, cvsq=cvsq, osdi=osdi), qs=items, seed=seed, sid=uuid.uuid4().hex[:8], stage="camera"); st.rerun()
     elif S.stage == "camera":
-        if not llm.is_loaded(S.model):
-            with st.spinner("Loading Llama for grading (first use downloads it automatically; please wait)…"):
-                try: llm.load(S.model)
-                except Exception as e: st.error(f"Could not load the model: {e}. Open **Model setup (Llama)** (token, licence, GPU memory)."); return
+        if not llm.status(S.model)["key"]: st.error("No API key for grading. Open **Model setup (API)** first."); return
         ctx, proc = cam(); st_autorefresh(1500, key="camtick")
         st.subheader("Camera check"); st.write("Click **START** in the sidebar, allow the camera, face the screen with front lighting, and sit about 60 cm away.")
         ok = False
@@ -136,40 +147,46 @@ def run(proc):
 
 
 # ------------------------------------------------------------------ model setup / diagnostics
-PRESETS = ["meta-llama/Llama-3.2-11B-Vision-Instruct", "meta-llama/Llama-3.2-3B-Instruct", "meta-llama/Llama-3.2-1B-Instruct"]
-
 def setup():
-    st.title("🛠️ Model setup · Llama (Hugging Face)")
-    st.caption("The model downloads **automatically** the first time it is loaded (progress appears in the terminal where Streamlit runs). There is no download button.")
-    labels = ["Llama-3.2-11B-Vision-Instruct (vision; GPU, ~10 GB VRAM in 4-bit)", "Llama-3.2-3B-Instruct (text; light)", "Llama-3.2-1B-Instruct (text; testing only)", "other…"]
-    pick = st.selectbox("Model", labels, index=PRESETS.index(S.model) if S.model in PRESETS else 3)
-    S.model = ("meta-llama/" + pick.split(" ")[0]) if not pick.startswith("other") else (st.text_input("Hugging Face model id", S.model).strip() or llm.MODEL)
-    tok = st.text_input("Hugging Face access token (Llama is gated: accept the licence on the model page first)", value=os.getenv("HF_TOKEN", ""), type="password")
-    if tok: os.environ["HF_TOKEN"] = tok.strip()
-    s = llm.status(S.model); c = st.columns(5)
-    c[0].metric("Libraries", "✅" if s["libs"] else "❌"); c[1].metric("GPU", f"✅ {s['vram_gb']} GB" if s["cuda"] else "none (CPU)")
-    c[2].metric("HF token", "✅" if s["token"] else "❌"); c[3].metric("Cached on disk", "✅" if s["cached"] else "not yet"); c[4].metric("Loaded", "✅" if s["loaded"] else "no")
-    if not s["libs"]: st.error("Install the libraries:  pip install torch transformers accelerate bitsandbytes huggingface_hub  (then restart the app)")
-    if "vision" in S.model.lower() and not s["cuda"]: st.warning("Llama 3.2 Vision (11B) is far too slow on CPU. Use a CUDA GPU, or choose Llama-3.2-3B-Instruct.")
-    st.info("Llama models are gated: open the model page on huggingface.co, accept the licence, create a read token and paste it above (or set HF_TOKEN). The first load downloads the weights once; later runs use the cache.")
-    c1, c2 = st.columns(2)
-    if c1.button("Load model and run JSON test", disabled=not s["libs"]):
-        with st.spinner("Loading the model (first use downloads it automatically; this can take a long time)…"):
-            try: r = llm.ask("Reply with JSON only.", 'Return {"ok": true, "reply": "hello"}', 0, S.model, max_new=40); S["_test"] = "ok"; st.success("Model works."); st.json(r)
-            except Exception as e: st.error(f"Failed: {e}")
-    if c2.button("Generate one sample item", disabled=not s["libs"]):
+    st.title("🛠️ Model setup · hosted Llama API")
+    st.caption("Nothing is downloaded: the app calls a hosted model (works on Streamlit Cloud). Get a free key, add it to Streamlit secrets or paste it below.")
+    names = list(llm.PROVIDERS)
+    prov = st.selectbox("Provider", names, index=names.index(llm.CFG["provider"]))
+    if prov != llm.CFG["provider"]: llm.CFG["provider"] = prov; S.model = llm.PROVIDERS[prov]["model"]
+    p = llm.PROVIDERS[prov]
+    if prov == "Custom":
+        p["base"] = st.text_input("Base URL (OpenAI-compatible, ending in /v1)", p["base"])
+    key = st.text_input(f"API key ({p['key']})", value="", type="password", help=f"Or add {p['key']} to .streamlit/secrets.toml / Streamlit Cloud secrets.")
+    if key: llm.CFG["key"] = key.strip()
+    S.model = st.text_input("Model name", S.model or p["model"]).strip() or p["model"]
+    s = llm.status(S.model); c = st.columns(3)
+    c[0].metric("Provider", s["provider"]); c[1].metric("API key", "✅ set" if s["key"] else "❌ missing"); c[2].metric("Model test", S.get("_test", "not run"))
+    st.markdown({"Groq (Llama)": "Free key: **console.groq.com** → API Keys. Llama models, very fast.", "Hugging Face": "Token: **huggingface.co/settings/tokens** (enable *Inference Providers*). Use a non-gated model such as `Qwen/Qwen2.5-7B-Instruct`.",
+                 "OpenRouter": "Key: **openrouter.ai/keys**. Some Llama models are free.", "Custom": "Any OpenAI-compatible server."}[prov])
+    c1, c2, c3 = st.columns(3)
+    if c1.button("List available models", disabled=not s["key"]):
+        try: ms = llm.list_models(); st.success(f"{len(ms)} models"); st.code("\n".join(ms))
+        except Exception as e: st.error(f"Could not list models: {e}")
+    if c2.button("Run JSON test", disabled=not s["key"]):
+        with st.spinner("Asking the model…"):
+            try: r = llm.ask("Reply with JSON only.", 'Return {"ok": true, "reply": "hello"}', 0, S.model, max_new=40); S["_test"] = "✅ works"; st.success("Model works."); st.json(r)
+            except Exception as e: S["_test"] = "❌ failed"; st.error(f"Failed: {e}")
+    if c3.button("Generate one sample item", disabled=not s["key"]):
         with st.spinner("Generating…"): it = bank.make_item("REST API design", "Data and APIs", S.model)
         if it: st.success(f"Valid item generated ({it['words']} words)"); st.write(it["paragraph"]); st.json(it["questions"])
-        else: st.error("No valid item after 3 tries. Try a larger model or generate again.")
+        else: st.error("No valid item after 3 tries. Try a larger model (for example llama-3.3-70b-versatile) or generate again.")
 
 # ------------------------------------------------------------------ admin
 def admin():
     st.title("🗂️ Item bank (admin)")
     s = llm.status(S.model)
-    st.info(f"Model: `{S.model}` · cached: {'yes' if s['cached'] else 'no (downloads automatically on first use)'} · loaded: {'yes' if s['loaded'] else 'no'}. Change it in **Model setup (Llama)**.")
-    ms = [S.model] if s["libs"] else []
-    if not s["libs"]: st.error("PyTorch/transformers are not installed. See **Model setup (Llama)**.")
+    st.info(f"Model: `{S.model}` via {s['provider']} · API key: {'set' if s['key'] else 'MISSING'}. Change it in **Model setup (API)**.")
+    ms = [S.model] if s["key"] else []
+    if not s["key"]: st.error("No API key. Open **Model setup (API)** and add one.")
     b = bank.load(); cov = bank.coverage(b); st.write("**Approved items per cluster**"); st.bar_chart(pd.Series(cov, name="approved"))
+    if b: st.download_button("⬇ Download bank.json (back it up: Streamlit Cloud storage is temporary)", json.dumps(b, indent=1), "bank.json", "application/json")
+    up = st.file_uploader("Restore a saved bank.json", type="json")
+    if up and st.button("Replace the bank with the uploaded file"): bank.save(json.load(up)); st.rerun()
     with st.expander("Generate new items with Llama", expanded=not b):
         cl = st.multiselect("Clusters", list(bank.CLUSTERS), default=list(bank.CLUSTERS)); n = st.slider("Items per area", 1, 5, 1)
         if st.button("Generate", type="primary", disabled=not ms):
@@ -201,9 +218,10 @@ def recruiter():
     a, b = st.columns(2); a.subheader("Score distribution"); a.bar_chart(tab.score.value_counts(bins=5).sort_index().rename(lambda x: str(x)))
     b.subheader("Visual-risk levels (shown for context; never used to rank)"); b.bar_chart(tab.risk.value_counts())
     st.dataframe(tab, hide_index=True, use_container_width=True)
-    sel = st.selectbox("Open candidate session", tab.session); st.divider(); report.render(next(r for r in reps if r["sid"] == sel))
+    sel = st.selectbox("Open candidate session", tab.session); rep = next(r for r in reps if r["sid"] == sel)
+    st.download_button("⬇ Download this session (JSON)", json.dumps(rep, indent=1), f"{sel}.json", "application/json"); st.divider(); report.render(rep)
 
-mode = st.sidebar.radio("Mode", ["Candidate interview", "Item bank (admin)", "Recruiter dashboard", "Model setup (Llama)"])
-if S.stage != "run": st.sidebar.caption(f"Llama: {S.model.split('/')[-1]} · " + ("✅ loaded" if llm.is_loaded(S.model) else "loads on first use"))
+mode = st.sidebar.radio("Mode", ["Candidate interview", "Item bank (admin)", "Recruiter dashboard", "Model setup (API)"])
+if S.stage != "run": _s = llm.status(S.model); st.sidebar.caption(f"LLM: {_s['provider']} · {S.model} · " + ("✅ key set" if _s["key"] else "❌ no key — open Model setup"))
 if mode != "Candidate interview" and S.stage in ("camera", "run"): st.sidebar.warning("An interview is in progress.")
-{"Candidate interview": candidate, "Item bank (admin)": admin, "Recruiter dashboard": recruiter, "Model setup (Llama)": setup}[mode]()
+{"Candidate interview": candidate, "Item bank (admin)": admin, "Recruiter dashboard": recruiter, "Model setup (API)": setup}[mode]()
