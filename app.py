@@ -15,6 +15,15 @@ NEUTRAL = ("Please read this neutral text silently at your normal pace. Rivers c
            "fast water, summer slows it, and autumn leaves gather along the banks. Keep your head still and your eyes on the screen.")
 os.makedirs("data/sessions", exist_ok=True)
 S.setdefault("stage", "pre"); S.setdefault("model", llm.MODEL)
+import shutil, subprocess
+
+def ollama_status(force=False):
+    """(running, models, detail); cached for 10 s so reruns stay fast."""
+    c = S.get("_ol")
+    if force or not c or time.time() - c[0] > 10:
+        c = (time.time(),) + llm.ping(S.get("host") or None); S["_ol"] = c
+    return c[1:]
+
 
 def build_steps(items):
     s = [dict(k="setup", dur=60), dict(k="calib", dur=90), dict(k="baseline", dur=60)]
@@ -129,12 +138,61 @@ def run(proc):
         with st.spinner("Scoring answers (Llama) and analysing eye signals…"): finalize(proc)
         st.rerun()
 
+
+# ------------------------------------------------------------------ setup / diagnostics
+def setup():
+    st.title("🛠️ Setup · Ollama (Llama)")
+    st.caption("Llama runs locally through Ollama. Work down the three checks; each one explains how to fix itself.")
+    S.host = st.text_input("Ollama address", S.get("host", llm.HOST), help="Default http://localhost:11434. Try http://127.0.0.1:11434 if localhost fails.")
+    llm.HOST = S.host.rstrip("/")
+    ok, ms, detail = ollama_status(force=st.button("🔄 Re-check"))
+    c = st.columns(3)
+    c[0].metric("1 · Ollama running", "✅ yes" if ok else "❌ no"); c[1].metric("2 · Model installed", f"✅ {len(ms)}" if ms else "❌ none"); c[2].metric("3 · Llama test", S.get("_test", "not run"))
+    if ok: st.success(f"Connected to {detail}")
+    else:
+        st.error(f"Cannot reach Ollama ({detail[:120]})")
+        if shutil.which("ollama"):
+            st.write("Ollama is installed on this computer but not running.")
+            if st.button("▶ Start Ollama server"):
+                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); time.sleep(4); ollama_status(True); st.rerun()
+        else:
+            st.warning("The `ollama` command was not found. Install Ollama, then reopen this page and click Re-check.")
+            st.link_button("Download Ollama", "https://ollama.com/download")
+        with st.expander("Other fixes"):
+            st.markdown("- Open http://localhost:11434 in a browser: it should say *Ollama is running*.\n- If `localhost` fails, set the address above to `http://127.0.0.1:11434`.\n"
+                        "- Turn off VPN/proxy for localhost, and allow port 11434 in the firewall.\n- If Streamlit runs in WSL or Docker, use the Windows host address (for example `http://host.docker.internal:11434`).")
+    st.divider(); st.subheader("Download a model")
+    pick = st.selectbox("Model", ["llama3.1:8b (best, ~4.7 GB, 8 GB RAM)", "llama3.2:3b (smaller, ~2 GB)", "llama3.2:1b (tiny, testing only)", "other…"])
+    name = st.text_input("Model name", "") if pick.startswith("other") else pick.split(" ")[0]
+    if st.button("⬇ Download model", disabled=not (ok and name)):
+        bar = st.progress(0.0, text="Starting…"); last = 0.0
+        try:
+            for ev in llm.pull(name):
+                if ev.get("error"): st.error(ev["error"]); break
+                if ev.get("total"): last = min(1.0, ev.get("completed", 0) / ev["total"]); bar.progress(last, text=f"{ev.get('status', '')} {ev.get('completed', 0) / 1e9:.2f} / {ev['total'] / 1e9:.2f} GB")
+                else: bar.progress(last, text=ev.get("status", ""))
+            else: st.success(f"{name} is ready."); ollama_status(True)
+        except Exception as e: st.error(f"Download failed: {e}")
+    if ms:
+        S.model = st.selectbox("Model used by the app", ms, index=ms.index(S.model) if S.model in ms else 0, key="setup_model")
+        st.divider(); st.subheader("Test Llama")
+        c1, c2 = st.columns(2)
+        if c1.button("Run JSON test"):
+            with st.spinner("Asking Llama…"):
+                try: r = llm.ask("Reply with JSON only.", 'Return {"ok": true, "reply": "hello"}', 0, S.model); S["_test"] = "✅ works"; st.json(r)
+                except Exception as e: S["_test"] = "❌ failed"; st.error(f"Test failed: {e}")
+        if c2.button("Generate one sample item"):
+            with st.spinner("Generating (can take up to a minute)…"):
+                it = bank.make_item("REST API design", "Data and APIs", S.model)
+            if it: st.success(f"Valid item generated ({it['words']} words)"); st.write(it["paragraph"]); st.json(it["questions"])
+            else: st.error("The model did not return a valid item after 3 tries. Try a larger model (llama3.1:8b).")
+
 # ------------------------------------------------------------------ admin
 def admin():
     st.title("🗂️ Item bank (admin)")
-    ms = llm.models()
-    if ms: st.success(f"Ollama reachable · models: {', '.join(ms)}"); S.model = st.selectbox("Model", ms, index=ms.index(S.model) if S.model in ms else 0)
-    else: st.error("Ollama is not reachable. Install Ollama, run `ollama pull llama3.1:8b`, then `ollama serve`.")
+    ok, ms, _ = ollama_status()
+    if ok and ms: st.success(f"Ollama reachable · models: {', '.join(ms)}"); S.model = st.selectbox("Model", ms, index=ms.index(S.model) if S.model in ms else 0)
+    else: st.error("Ollama is not ready (not running, or no model downloaded). Open **Setup (Ollama)** in the sidebar and follow the steps there."); ms = []
     b = bank.load(); cov = bank.coverage(b); st.write("**Approved items per cluster**"); st.bar_chart(pd.Series(cov, name="approved"))
     with st.expander("Generate new items with Llama", expanded=not b):
         cl = st.multiselect("Clusters", list(bank.CLUSTERS), default=list(bank.CLUSTERS)); n = st.slider("Items per area", 1, 5, 1)
@@ -169,6 +227,9 @@ def recruiter():
     st.dataframe(tab, hide_index=True, use_container_width=True)
     sel = st.selectbox("Open candidate session", tab.session); st.divider(); report.render(next(r for r in reps if r["sid"] == sel))
 
-mode = st.sidebar.radio("Mode", ["Candidate interview", "Item bank (admin)", "Recruiter dashboard"])
+mode = st.sidebar.radio("Mode", ["Candidate interview", "Item bank (admin)", "Recruiter dashboard", "Setup (Ollama)"])
+if S.stage != "run":
+    _ok, _ms, _ = ollama_status(); st.sidebar.caption("Llama: " + (f"✅ {S.model}" if _ok and _ms else "❌ not ready — open Setup (Ollama)"))
 if mode != "Candidate interview" and S.stage in ("camera", "run"): st.sidebar.warning("An interview is in progress.")
-{"Candidate interview": candidate, "Item bank (admin)": admin, "Recruiter dashboard": recruiter}[mode]()
+{"Candidate interview": candidate, "Item bank (admin)": admin, "Recruiter dashboard": recruiter, "Setup (Ollama)": setup}[mode]()
+
