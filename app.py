@@ -3,10 +3,10 @@ import os, glob, json, time, random, uuid
 import numpy as np, pandas as pd, streamlit as st
 from concurrent.futures import ThreadPoolExecutor
 from streamlit_autorefresh import st_autorefresh
-import bank, llm, features, report
+import bank, llm, features, report, grader, semantic
 
 st.set_page_config(page_title="ScreenFit", page_icon="👁️", layout="wide")
-for _m, _n in ((bank, "make_item"), (llm, "ask"), (features, "compute"), (report, "build")):
+for _m, _n in ((bank, "make_item"), (llm, "ask"), (features, "compute"), (report, "build"), (grader, "grade"), (semantic, "warm")):
     if not hasattr(_m, _n): st.error(f"`{_m.__name__}.py` has the wrong content (missing `{_n}`). Re-copy it from the project zip."); st.stop()
 S = st.session_state
 def get_rtc():
@@ -47,7 +47,7 @@ def advance(timeout=False):
             elif q["type"] == "tf": val = (raw == "True")
             else: val = raw.strip()
         S.ans[key] = dict(val=val, timed_out=bool(timeout and val is None))
-        if q["type"] == "short" and val: S.jobs[key] = S.pool.submit(llm.grade_short, q, val, 3, S.model)
+        if q["type"] == "short" and val: S.jobs[key] = S.pool.submit(grader.grade, q, val, S.get("grader", "semantic"), S.model)
     S.i += 1; S.t_step = time.time()
 
 def cam():
@@ -67,6 +67,7 @@ def finalize(proc):
     for k, f in S.jobs.items():
         try: grades[k] = f.result(timeout=120)
         except Exception: grades[k] = None
+    S.meta["grader"] = semantic.engine() if S.get("grader", "semantic") == "semantic" else f"LLM {S.model}"
     rep = report.build(S.sid, S.seed, S.meta, S.qs, S.ans, grades, feats, S.get("post", {}))
     json.dump(rep, open(f"data/sessions/{S.sid}.json", "w"), indent=1); S.rep = rep; S.stage = "done"
 
@@ -89,7 +90,11 @@ def candidate():
             if not ok: st.error("Consent is required."); return
             S.update(meta=dict(level=level, glasses=glasses, screen_hours=hrs, cvsq=cvsq, osdi=osdi), qs=items, seed=seed, sid=uuid.uuid4().hex[:8], stage="camera"); st.rerun()
     elif S.stage == "camera":
-        if not llm.status(S.model)["key"]: st.error("No API key for grading. Open **Model setup (API)** first."); return
+        if S.get("grader", "semantic") == "llm" and not llm.api_key(): st.error("The LLM grader needs an API key. Open **Model setup** (or switch to the free grader)."); return
+        if S.get("grader", "semantic") == "semantic" and not S.get("_warm"):
+            with st.spinner("Preparing the free grading model (first use downloads it automatically; please wait)…"): S["_eng"] = semantic.warm()
+            S["_warm"] = True
+        st.caption(f"Short-answer grader: {S.get('_eng', 'LLM API')}")
         ctx, proc = cam(); st_autorefresh(1500, key="camtick")
         st.subheader("Camera check"); st.write("Click **START** in the sidebar, allow the camera, face the screen with front lighting, and sit about 60 cm away.")
         ok = False
@@ -147,9 +152,7 @@ def run(proc):
 
 
 # ------------------------------------------------------------------ model setup / diagnostics
-def setup():
-    st.title("🛠️ Model setup · hosted Llama API")
-    st.caption("Nothing is downloaded: the app calls a hosted model (works on Streamlit Cloud). Get a free key, add it to Streamlit secrets or paste it below.")
+def api_setup():
     names = list(llm.PROVIDERS)
     prov = st.selectbox("Provider", names, index=names.index(llm.CFG["provider"]))
     if prov != llm.CFG["provider"]: llm.CFG["provider"] = prov; S.model = llm.PROVIDERS[prov]["model"]
@@ -176,13 +179,31 @@ def setup():
         if it: st.success(f"Valid item generated ({it['words']} words)"); st.write(it["paragraph"]); st.json(it["questions"])
         else: st.error("No valid item after 3 tries. Try a larger model (for example llama-3.3-70b-versatile) or generate again.")
 
+def setup():
+    st.title("🛠️ Model setup · free local grader (no API key)")
+    st.caption("Short answers are graded by a small free embedding model that downloads automatically on first use (like EasyOCR), plus keyword matching. The question bank is built in, so nothing needs a key.")
+    S.grader = st.radio("Short-answer grader", ["semantic", "llm"], index=0 if S.get("grader", "semantic") == "semantic" else 1, horizontal=True,
+                        format_func=lambda x: {"semantic": "Free semantic grader (default, no key)", "llm": "LLM through an API key (optional)"}[x])
+    c = st.columns(3); started = semantic._M["m"] is not None or semantic._M["err"] is not None
+    c[0].metric("Grader engine", semantic.engine() if started else "not loaded yet"); c[1].metric("Question bank", f"{len(bank.load())} items"); c[2].metric("LLM key", "set" if llm.api_key() else "not set (optional)")
+    if st.button("Load the free grading model now"):
+        with st.spinner("Loading (first use downloads ~130 MB automatically)…"): eng = semantic.warm()
+        (st.success if semantic._M["m"] is not None else st.warning)(f"Engine: {eng}" + ("" if semantic._M["m"] is not None else f" (model unavailable: {semantic._M['err']}; keyword scoring still works)"))
+    st.subheader("Try the grader")
+    b = bank.load(); qs = [(i["area"], q) for i in b for q in i["questions"] if q["type"] == "short"]
+    pick = st.selectbox("Question", range(len(qs)), format_func=lambda n: f"{qs[n][0]}: {qs[n][1]['text']}"); q = qs[pick][1]
+    st.caption(f"Model answer: {q['key']}"); ans = st.text_input("Type an answer to test", "")
+    if st.button("Grade this answer"):
+        r = grader.grade(q, ans, S.grader, S.model); st.metric("Score (0-1)", r["score"] if r.get("score") is not None else "error"); st.json({k: v for k, v in r.items() if k != "score"})
+    with st.expander("Optional: LLM API (generate more items, or grade with an LLM)"): api_setup()
+
 # ------------------------------------------------------------------ admin
 def admin():
     st.title("🗂️ Item bank (admin)")
     s = llm.status(S.model)
-    st.info(f"Model: `{S.model}` via {s['provider']} · API key: {'set' if s['key'] else 'MISSING'}. Change it in **Model setup (API)**.")
+    st.info(f"Model: `{S.model}` via {s['provider']} · API key: {'set' if s['key'] else 'MISSING'}. Change it in **Model setup**.")
     ms = [S.model] if s["key"] else []
-    if not s["key"]: st.error("No API key. Open **Model setup (API)** and add one.")
+    if not s["key"]: st.info("Optional: add an API key in **Model setup** to generate more items. A built-in bank of 23 curated items is already available.")
     b = bank.load(); cov = bank.coverage(b); st.write("**Approved items per cluster**"); st.bar_chart(pd.Series(cov, name="approved"))
     if b: st.download_button("⬇ Download bank.json (back it up: Streamlit Cloud storage is temporary)", json.dumps(b, indent=1), "bank.json", "application/json")
     up = st.file_uploader("Restore a saved bank.json", type="json")
@@ -221,7 +242,7 @@ def recruiter():
     sel = st.selectbox("Open candidate session", tab.session); rep = next(r for r in reps if r["sid"] == sel)
     st.download_button("⬇ Download this session (JSON)", json.dumps(rep, indent=1), f"{sel}.json", "application/json"); st.divider(); report.render(rep)
 
-mode = st.sidebar.radio("Mode", ["Candidate interview", "Item bank (admin)", "Recruiter dashboard", "Model setup (API)"])
-if S.stage != "run": _s = llm.status(S.model); st.sidebar.caption(f"LLM: {_s['provider']} · {S.model} · " + ("✅ key set" if _s["key"] else "❌ no key — open Model setup"))
+mode = st.sidebar.radio("Mode", ["Candidate interview", "Item bank (admin)", "Recruiter dashboard", "Model setup"])
+if S.stage != "run": st.sidebar.caption("Grader: " + ("free semantic (no key)" if S.get("grader", "semantic") == "semantic" else f"LLM · {S.model}"))
 if mode != "Candidate interview" and S.stage in ("camera", "run"): st.sidebar.warning("An interview is in progress.")
-{"Candidate interview": candidate, "Item bank (admin)": admin, "Recruiter dashboard": recruiter, "Model setup (API)": setup}[mode]()
+{"Candidate interview": candidate, "Item bank (admin)": admin, "Recruiter dashboard": recruiter, "Model setup": setup}[mode]()
