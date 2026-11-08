@@ -46,7 +46,8 @@ def build(sid, seed, meta, items, ans, grades, feats, post):
     flags = eye_signs(feats)
     vis = dict(risk=risk_level(meta["cvsq"], meta["osdi"]), flags=flags,
                baseline=feats["baseline"] if feats else None, ear0=feats["ear0"] if feats else None,
-               para=feats["para"] if feats else pd.DataFrame(), quality=feats["quality"] if feats else {})
+               para=feats["para"] if feats else pd.DataFrame(), quality=feats["quality"] if feats else {},
+               ear=dict(stats=feats["stats"], frames=feats["frames"], series=feats["series"], events=feats["events"], phases=feats["phases"]) if feats else None)
     return clean(dict(sid=sid, seed=seed, when=time.strftime("%Y-%m-%d %H:%M"), meta=meta, technical=tech, visual=vis, post=post,
                       items=[dict(para=i + 1, cluster=it["cluster"], area=it["area"], id=it["id"], text=it["paragraph"]) for i, it in enumerate(items)]))
 
@@ -61,11 +62,11 @@ def df_(x): return pd.DataFrame(x) if x is not None else pd.DataFrame()
 def render(rep, candidate=False):
     t, v, m = rep["technical"], rep["visual"], rep["meta"]; q = df_(t["questions"]); vp = df_(v["para"]); qual = v.get("quality") or {}
     if candidate: st.info("You see your own results first. Technical and visual-fitness results are shown separately.")
-    st.caption(f"Session {rep['sid']} · {rep['when']} · item-set seed {rep['seed']} · role level: {m.get('level','-')}")
+    st.caption(f"Session {rep['sid']} · {rep['when']} · item-set seed {rep['seed']} · role level: {m.get('level','-')} · grader: {m.get('grader','-')}")
     k = st.columns(4)
     k[0].metric("Technical score", f"{t['overall']:.0f} / 100"); k[1].metric("Visual fitness", f"{v['risk']} risk")
     k[2].metric("Face detected", f"{qual.get('face_ok', float('nan')):.0f}%" if qual else "n/a"); k[3].metric("Timed-out questions", int(q.timed_out.sum()))
-    tabs = st.tabs(["Overview (A-F)", "A Technical score", "B Skills profile", "C Visual fitness", "D Fatigue trend", "E Reading behaviour", "F Quality & safeguards", "Items & grading"])
+    tabs = st.tabs(["Overview (A-F)", "A Technical score", "B Skills profile", "C Visual fitness", "D Fatigue trend", "E Reading behaviour", "F Quality & safeguards", "EAR & frames", "Items & grading"])
     with tabs[0]:
         a, b, c = st.columns([1, 1.4, 1.2])
         with a:
@@ -87,7 +88,7 @@ def render(rep, candidate=False):
         with f:
             st.subheader("F · Quality & safeguards"); st.write(f"✅ Face detected: {qual.get('face_ok', float('nan')):.0f}% of frames" if qual else "⚠️ No eye data")
             st.write(f"✅ Gaze error: {qual.get('gaze_err_deg', float('nan')):.1f}°" if qual and qual.get("gaze_err_deg") is not None else "⚠️ Gaze calibration unavailable")
-            st.write("✅ Raw video never stored"); st.write("⚠️ Panels A-B and C are never combined"); st.write("⚠️ Human review required")
+            st.write("✅ No video recorded: only EAR numbers kept"); st.write("⚠️ Panels A-B and C are never combined"); st.write("⚠️ Human review required")
     with tabs[1]:
         st.subheader("A · Technical interview score"); c1, c2 = st.columns(2)
         c1.metric("Overall", f"{t['overall']:.0f} / 100"); c1.bar_chart(pd.Series(t["para"], index=[f"P{i+1}" for i in range(len(t["para"]))], name="score by paragraph"))
@@ -131,6 +132,30 @@ def render(rep, candidate=False):
         st.table(pd.DataFrame(rows, columns=["Check", "Value", "Target"]).astype(str))
         for s in ["Video processed locally and never stored", "Only derived numbers saved under an anonymous ID", "Technical (A-B) and visual (C) panels never combined", "Candidate sees own results first", "Human review required before any use"]: st.write("✅ " + s)
     with tabs[7]:
+        st.subheader("EAR and frame data")
+        st.caption("No video is recorded or stored. Only these numbers are kept: the eye aspect ratio (EAR) of each analysed frame, summarised below.")
+        e = v.get("ear")
+        if not e: st.caption("No usable eye data.")
+        else:
+            f, s_ = e["frames"], e["stats"]; ser, ev, ph = df_(e["series"]), df_(e["events"]), df_(e["phases"])
+            c = st.columns(4); c[0].metric("Frames analysed", f"{f['total']:,}"); c[1].metric("Face detected", f"{f['face_pct']:.1f}%"); c[2].metric("Frame rate", f"{f['fps']:.0f} fps"); c[3].metric("Duration", f"{int(f['duration_s'] // 60)}:{int(f['duration_s'] % 60):02d}")
+            c = st.columns(4); c[0].metric("Baseline EAR", f"{s_['ear0']:.3f}"); c[1].metric("Blink threshold (72%)", f"{s_['thr_blink']:.3f}"); c[2].metric("Closure threshold (20%)", f"{s_['thr_close']:.3f}"); c[3].metric("Eye-closed frames", f"{f['closed']:,} ({100 * f['closed'] / max(1, f['face']):.1f}%)")
+            mins = max(f["duration_s"] / 60, 1e-6); c = st.columns(4); c[0].metric("Blinks (total)", len(ev)); c[1].metric("Blink rate", f"{len(ev) / mins:.1f} /min")
+            c[2].metric("Mean blink duration", f"{ev.dur_ms.mean():.0f} ms" if len(ev) else "n/a"); c[3].metric("EAR mean ± SD", f"{s_['ear_mean']:.3f} ± {s_['ear_std']:.3f}")
+            st.markdown("**EAR over the session** (lowest EAR in each 0.25 s window, so blinks show as dips)")
+            if not ser.empty: st.line_chart(ser.set_index("t")[["ear"]].assign(blink_threshold=s_["thr_blink"], closure_threshold=s_["thr_close"]))
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Blink durations (ms)**")
+                if len(ev): st.bar_chart(pd.cut(ev.dur_ms, [0, 100, 150, 200, 250, 300, 400]).value_counts().sort_index().rename(lambda x: str(x)))
+            with c2:
+                st.markdown("**By phase**"); cols = [x for x in ["phase", "frames", "face_frames", "ear_mean", "ear_min", "blinks", "blink_rate", "perclos"] if x in ph.columns]
+                st.dataframe(ph[cols].round(2), hide_index=True, use_container_width=True)
+            st.markdown("**By paragraph**"); cols = [x for x in ["para", "frames", "face_frames", "ear_mean", "ear_min", "ear_std", "blinks", "blink_rate", "perclos", "closed_frames"] if x in vp.columns]
+            st.dataframe(vp[cols].round(2), hide_index=True, use_container_width=True)
+            if len(ev): st.markdown("**Blink events**"); st.dataframe(ev.round(3), hide_index=True, use_container_width=True)
+            d1, d2 = st.columns(2); d1.download_button("⬇ EAR series (CSV)", ser.to_csv(index=False), f"ear_{rep['sid']}.csv", "text/csv"); d2.download_button("⬇ Blink events (CSV)", ev.to_csv(index=False), f"blinks_{rep['sid']}.csv", "text/csv")
+    with tabs[8]:
         st.subheader("Items and grading")
         for it in rep["items"]:
             with st.expander(f"Paragraph {it['para']} · {it['cluster']} · {it['area']} ({it['id']})"):
