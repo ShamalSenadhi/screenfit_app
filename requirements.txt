@@ -16,8 +16,6 @@ transformers>=4.45
 accelerate
 huggingface_hub
 bitsandbytes; sys_platform != "darwin"   # optional 4-bit loading on NVIDIA GPUs
-# Works on Streamlit Community Cloud (Python 3.11) and locally (Python 3.10-3.12).
-# mediapipe 0.10.14 is pinned because newer releases removed the mp.solutions API used here.
 streamlit==1.40.2
 streamlit-webrtc==0.47.9
 streamlit-autorefresh
@@ -30,3 +28,4 @@ pandas
 scikit-learn
 requests
 textstat
+fastembed          # free embedding model for grading short answers (auto-downloads, no key)
