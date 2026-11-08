@@ -17,13 +17,26 @@ def blinks(d, ear0, lo=0.72, min_ms=70, max_ms=400):
             start = None
     return out
 
+def blink_events(df, ear0, lo=0.72, min_ms=70, max_ms=400):
+    """Every blink in the session: start time (s), duration (ms), lowest EAR and the interview step."""
+    d = df[df.ok == 1]; t0 = df.t.min(); t, e, lab = d.t.values, d.ear.values, d.label.values; out, start = [], None
+    for i in range(len(d)):
+        if e[i] < lo * ear0 and start is None: start = i
+        if (e[i] >= lo * ear0 or i == len(d) - 1) and start is not None:
+            ms = (t[i] - t[start]) * 1000
+            if min_ms <= ms <= max_ms: out.append(dict(t=float(t[start] - t0), dur_ms=float(ms), min_ear=float(e[start:i + 1].min()), step=str(lab[start])))
+            start = None
+    return out
+
 def summ(d, ear0):
-    d = d[d.ok == 1]
-    if len(d) < 10: return dict(blink_rate=np.nan, perclos=np.nan, incomplete=np.nan, blink_ms=np.nan)
+    n = len(d); d = d[d.ok == 1]; base = dict(frames=int(n), face_frames=int(len(d)))
+    if len(d) < 10: return dict(blink_rate=np.nan, perclos=np.nan, incomplete=np.nan, blink_ms=np.nan, ear_mean=np.nan, ear_min=np.nan, ear_std=np.nan, blinks=0, closed_frames=0, **base)
     mins = max((d.t.max() - d.t.min()) / 60, 1e-6); b = blinks(d, ear0)
     return dict(blink_rate=len(b) / mins, perclos=float((d.ear < 0.2 * ear0).mean() * 100),
                 incomplete=float(np.mean([m > 0.2 * ear0 for _, m in b])) if b else 0.0,
-                blink_ms=float(np.mean([x for x, _ in b])) if b else np.nan)
+                blink_ms=float(np.mean([x for x, _ in b])) if b else np.nan,
+                ear_mean=float(d.ear.mean()), ear_min=float(d.ear.min()), ear_std=float(d.ear.std()), blinks=len(b),
+                closed_frames=int((d.ear < 0.2 * ear0).sum()), **base)
 
 def fit_gaze(df):
     c = df[(df.label == "calib") & (df.ok == 1) & df.tx.notna()].copy()
@@ -66,5 +79,15 @@ def compute(df):
         d = df[df.label.isin([f"read{p}", f"q{p}"])]
         rows.append(dict(para=p, **summ(d, ear0), **reading(d[d.label == f"read{p}"], m)))
     run = df[~df.label.isin(["idle", "setup"])]
-    return dict(ear0=ear0, baseline=summ(b, ear0), para=pd.DataFrame(rows),
+    ok = df[df.ok == 1]; t0 = df.t.min(); dt = np.diff(df.t.values); thr_b, thr_c = 0.72 * ear0, 0.20 * ear0
+    frames = dict(total=int(len(df)), face=int(len(ok)), face_pct=float(100 * len(ok) / max(1, len(df))), fps=float(1 / np.median(dt)) if len(dt) else float("nan"),
+                  duration_s=float(df.t.max() - t0), closed=int((ok.ear < thr_c).sum()), below_blink=int((ok.ear < thr_b).sum()))
+    stats = dict(ear0=ear0, thr_blink=thr_b, thr_close=thr_c, ear_mean=float(ok.ear.mean()), ear_std=float(ok.ear.std()), ear_min=float(ok.ear.min()),
+                 ear_p05=float(ok.ear.quantile(0.05)), ear_p95=float(ok.ear.quantile(0.95)))
+    g = ok.assign(bin=((ok.t - t0) * 4).astype(int)).groupby("bin").agg(ear=("ear", "min"), step=("label", "first")).reset_index()
+    series = [dict(t=b / 4, ear=e, step=s_) for b, e, s_ in zip(g.bin, g.ear, g.step)]          # 4 Hz, lowest EAR per window (blinks stay visible)
+    phase = lambda l: "reading" if l.startswith("read") else "questions" if l.startswith("q") else l
+    phases = pd.DataFrame([dict(phase=ph, **summ(df[df.label.map(phase) == ph], ear0)) for ph in ["setup", "calib", "baseline", "reading", "questions", "post"] if (df.label.map(phase) == ph).any()])
+    return dict(ear0=ear0, baseline=summ(b, ear0), para=pd.DataFrame(rows), stats=stats, frames=frames, series=series,
+                events=blink_events(df, ear0), phases=phases,
                 quality=dict(face_ok=float(run.ok.mean() * 100), gaze_err_deg=err, frames=int(len(df))))
