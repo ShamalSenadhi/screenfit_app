@@ -1,6 +1,10 @@
 """Webcam processor (MediaPipe Face Mesh) for streamlit-webrtc. Keeps only numeric signals, never frames."""
 import time, threading, numpy as np, pandas as pd
 from streamlit_webrtc import VideoProcessorBase
+import sys, types
+try: import cv2  # noqa: F401
+except Exception:                                   # e.g. libGL.so.1 missing on a server: mediapipe only needs cv2 for drawing helpers
+    sys.modules["cv2"] = types.ModuleType("cv2")
 import mediapipe as mp
 R = [33, 160, 158, 133, 153, 144]; L = [362, 385, 387, 263, 373, 380]
 
