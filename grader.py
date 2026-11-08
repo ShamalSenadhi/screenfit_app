@@ -2,7 +2,7 @@
 import llm, semantic
 
 def grade(q, answer, mode="semantic", model=None):
-    if mode == "llm" and llm.api_key():
+    if mode == "llm" and llm.ready():
         r = llm.grade_short(q, answer, 3, model)
         if r.get("score") is not None: return r
     return semantic.grade_short(q, answer)
