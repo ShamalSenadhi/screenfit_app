@@ -13,7 +13,9 @@ def get_rtc():
     """STUN by default. On Streamlit Cloud add TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN secrets for a TURN server (more reliable)."""
     c = S.get("_rtc")
     if c and time.time() - c[0] < 3000: return c[1]
-    cfg = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+    cfg = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]},
+                          {"urls": ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443?transport=tcp"],
+                           "username": "openrelayproject", "credential": "openrelayproject"}]}
     sid, tok = os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN")
     if sid and tok:
         try:
@@ -60,7 +62,8 @@ def cam():
     with st.sidebar:
         st.markdown("### Webcam (live preview only, nothing is recorded)")
         ctx = webrtc_streamer(key="eye", video_processor_factory=eyes.EyeProcessor, rtc_configuration=get_rtc(),
-                              media_stream_constraints={"video": {"width": 480, "height": 360}, "audio": False})
+                              media_stream_constraints={"video": {"width": 320, "height": 240, "frameRate": 15}, "audio": False},
+                              async_processing=True)
     return ctx, ctx.video_processor
 
 def finalize(proc):
