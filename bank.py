@@ -34,7 +34,7 @@ def valid(d):
                 and isinstance(qs[2]["answer"], bool) and all(q["key"] for q in qs[3:]))
     except Exception: return False
 
-def make_item(area, cluster, model=None, tries=3):
+def make_item(area, cluster, model=None, tries=5):
     for _ in range(tries):
         try: d = ask(SYS, PROMPT.replace("{area}", area), 0.5, model)
         except Exception: continue
@@ -43,7 +43,10 @@ def make_item(area, cluster, model=None, tries=3):
                      fk=round(textstat.flesch_kincaid_grade(d["paragraph"]), 1) if textstat else None)
             return d
 
-def load(): return json.load(open(BANK)) if os.path.exists(BANK) else []
+def load():
+    """Saved bank if present, otherwise the built-in curated seed bank (23 items, no model needed)."""
+    if os.path.exists(BANK): return json.load(open(BANK))
+    from seed_bank import items; return items()
 def save(b): os.makedirs("data", exist_ok=True); json.dump(b, open(BANK, "w"), indent=1)
 
 def coverage(bank):
