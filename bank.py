@@ -26,6 +26,27 @@ PROMPT = ("Area: {area}. Audience: mid-level software developer.\nWrite ONE para
           "then exactly 5 questions about it, in this order: 2 multiple-choice (4 options, 'answer' = index 0-3), 1 true/false, "
           "2 short-answer (answerable in at most 20 words, with 'key' and 'rubric').\nReturn JSON in exactly this shape: " + json.dumps(EXAMPLE))
 
+def normalize(d):
+    """Repair common small-model slips (letter answers, type names, order) before validation."""
+    try:
+        qs = [q for q in d["questions"] if isinstance(q, dict)]
+        names = {"multiplechoice": "mcq", "mcq": "mcq", "truefalse": "tf", "tf": "tf", "boolean": "tf", "shortanswer": "short", "short": "short", "open": "short"}
+        for q in qs:
+            q["type"] = names.get(str(q.get("type", "")).lower().replace("-", "").replace(" ", "").replace("_", "").replace("/", ""), q.get("type"))
+            if q["type"] == "mcq" and isinstance(q.get("options"), list):
+                o = [str(x) for x in q["options"]]; q["options"] = o; a = q.get("answer")
+                if isinstance(a, str):
+                    a = a.strip()
+                    if a[:1].upper() in list("ABCD") and (len(a) == 1 or a[1] in ".) :"): a = "ABCD".index(a[0].upper())
+                    elif a in o: a = o.index(a)
+                    elif a.isdigit(): a = int(a)
+                q["answer"] = a
+            elif q["type"] == "tf" and isinstance(q.get("answer"), str): q["answer"] = q["answer"].strip().lower() in ("true", "t", "yes")
+            elif q["type"] == "short": q["key"] = str(q.get("key") or q.get("answer") or ""); q.setdefault("rubric", "")
+        d["questions"] = [q for q in qs if q["type"] == "mcq"][:2] + [q for q in qs if q["type"] == "tf"][:1] + [q for q in qs if q["type"] == "short"][:2]
+    except Exception: pass
+    return d
+
 def valid(d):
     try:
         qs = d["questions"]; w = len(d["paragraph"].split())
@@ -38,6 +59,7 @@ def make_item(area, cluster, model=None, tries=5):
     for _ in range(tries):
         try: d = ask(SYS, PROMPT.replace("{area}", area), 0.5, model)
         except Exception: continue
+        d = normalize(d)
         if valid(d):
             d.update(area=area, cluster=cluster, words=len(d["paragraph"].split()), approved=False, id=f"{area[:5]}-{random.randrange(10**6)}",
                      fk=round(textstat.flesch_kincaid_grade(d["paragraph"]), 1) if textstat else None)
