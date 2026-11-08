@@ -51,10 +51,14 @@ def advance(timeout=False):
     S.i += 1; S.t_step = time.time()
 
 def cam():
-    from streamlit_webrtc import webrtc_streamer
-    import eyes
+    try:
+        from streamlit_webrtc import webrtc_streamer
+        import eyes
+    except Exception as e:
+        st.error(f"The eye-measurement library could not be loaded: `{type(e).__name__}: {e}`. On Streamlit Cloud add a file `packages.txt` (next to requirements.txt) with the two lines `libgl1` and `libglib2.0-0`, make sure requirements.txt has no other opencv package, then reboot the app.")
+        st.stop()
     with st.sidebar:
-        st.markdown("### Webcam (processed locally)")
+        st.markdown("### Webcam (live preview only, nothing is recorded)")
         ctx = webrtc_streamer(key="eye", video_processor_factory=eyes.EyeProcessor, rtc_configuration=get_rtc(),
                               media_stream_constraints={"video": {"width": 480, "height": 360}, "audio": False})
     return ctx, ctx.video_processor
@@ -77,7 +81,7 @@ def candidate():
     if S.stage == "pre":
         st.subheader("Pre-session form (not counted in the 20 minutes)")
         with st.form("pre_form"):
-            ok = st.checkbox("I have read the information sheet and agree to take part. My webcam video is analysed in memory by this application (on this computer, or on the hosting server if the app is online); no video is stored; this is not a medical diagnosis; I may withdraw at any time.")
+            ok = st.checkbox("I have read the information sheet and agree to take part. My webcam video is analysed in memory by this application (on this computer, or on the hosting server if the app is online); no video is recorded or stored (only eye-measurement numbers such as EAR and blink counts are kept); this is not a medical diagnosis; I may withdraw at any time.")
             c1, c2, c3 = st.columns(3)
             level = c1.selectbox("Role level", ["Junior", "Mid-level", "Senior"]); glasses = c2.checkbox("I wear glasses"); hrs = c3.number_input("Screen hours per day", 0.0, 16.0, 8.0, 0.5)
             st.markdown("Complete the official **CVS-Q** and **OSDI** questionnaires and enter your total scores:")
