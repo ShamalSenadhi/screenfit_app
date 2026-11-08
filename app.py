@@ -13,9 +13,7 @@ def get_rtc():
     """STUN by default. On Streamlit Cloud add TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN secrets for a TURN server (more reliable)."""
     c = S.get("_rtc")
     if c and time.time() - c[0] < 3000: return c[1]
-    cfg = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]},
-                          {"urls": ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443?transport=tcp"],
-                           "username": "openrelayproject", "credential": "openrelayproject"}]}
+    cfg = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
     sid, tok = os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN")
     if sid and tok:
         try:
@@ -52,13 +50,7 @@ def advance(timeout=False):
         if q["type"] == "short" and val: S.jobs[key] = S.pool.submit(grader.grade, q, val, S.get("grader", "semantic"), S.model)
     S.i += 1; S.t_step = time.time()
 
-class _NoCam:
-    """Stand-in used only when the webcam cannot connect (testing / fallback). Produces no eye data."""
-    label = "idle"; target = (np.nan, np.nan)
-    def df(self): return pd.DataFrame(columns=["t", "label", "tx", "ty", "ok"])
-
 def cam():
-    if S.get("nocam"): return None, _NoCam()
     try:
         from streamlit_webrtc import webrtc_streamer
         import eyes
@@ -68,8 +60,7 @@ def cam():
     with st.sidebar:
         st.markdown("### Webcam (live preview only, nothing is recorded)")
         ctx = webrtc_streamer(key="eye", video_processor_factory=eyes.EyeProcessor, rtc_configuration=get_rtc(),
-                              media_stream_constraints={"video": {"width": 320, "height": 240, "frameRate": 15}, "audio": False},
-                              async_processing=True)
+                              media_stream_constraints={"video": {"width": 480, "height": 360}, "audio": False})
     return ctx, ctx.video_processor
 
 def finalize(proc):
@@ -85,20 +76,6 @@ def finalize(proc):
     json.dump(rep, open(f"data/sessions/{S.sid}.json", "w"), indent=1); S.rep = rep; S.stage = "done"
 
 # ------------------------------------------------------------------ candidate
-@st.fragment(run_every=1.5)
-def cam_status(ctx):
-    """Refreshes only this block (not the whole page) so the webcam component is never re-created."""
-    proc = ctx.video_processor; ok = False
-    st.caption(f"Connection state: {ctx.state}")
-    if proc is not None:
-        d = proc.df().tail(45); ok = len(d) > 10 and d.ok.mean() > 0.9
-        st.write(("✅ Face detected" if ok else "⚠️ Face not detected reliably") + (f" ({d.ok.mean()*100:.0f}% of recent frames)" if len(d) else ""))
-    if st.button("Begin the 20-minute interview", type="primary", disabled=not (ctx.state.playing and ok)):
-        S.update(steps=build_steps(S.qs), i=0, ans={}, jobs={}, pool=ThreadPoolExecutor(2), t_start=time.time(), t_step=time.time(), stage="run"); st.rerun()
-    st.markdown("---"); st.write("Camera stuck on the spinner? Your network/host may block WebRTC. You can continue **without eye tracking** (no eye data is recorded; testing only).")
-    if st.button("Begin WITHOUT eye tracking"):
-        S.update(nocam=True, steps=build_steps(S.qs), i=0, ans={}, jobs={}, pool=ThreadPoolExecutor(2), t_start=time.time(), t_step=time.time(), stage="run"); st.rerun()
-
 def candidate():
     st.title("👁️ ScreenFit · 20-minute technical interview")
     if S.stage == "pre":
@@ -122,10 +99,14 @@ def candidate():
             with st.spinner("Preparing the free grading model (first use downloads it automatically; please wait)…"): S["_eng"] = semantic.warm()
             S["_warm"] = True
         st.caption(f"Short-answer grader: {S.get('_eng', 'LLM API')}")
-        S.nocam = False
-        ctx, _ = cam()
+        ctx, proc = cam(); st_autorefresh(1500, key="camtick")
         st.subheader("Camera check"); st.write("Click **START** in the sidebar, allow the camera, face the screen with front lighting, and sit about 60 cm away.")
-        cam_status(ctx)
+        ok = False
+        if proc is not None:
+            d = proc.df().tail(45); ok = len(d) > 10 and d.ok.mean() > 0.9
+            st.write(("✅ Face detected" if ok else "⚠️ Face not detected reliably") + (f" ({d.ok.mean()*100:.0f}% of recent frames)" if len(d) else ""))
+        if st.button("Begin the 20-minute interview", type="primary", disabled=not (ctx.state.playing and ok)):
+            S.update(steps=build_steps(S.qs), i=0, ans={}, jobs={}, pool=ThreadPoolExecutor(2), t_start=time.time(), t_step=time.time(), stage="run"); st.rerun()
     elif S.stage == "run":
         ctx, proc = cam(); st_autorefresh(1000, key="tick"); run(proc)
     else:
