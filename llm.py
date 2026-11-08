@@ -1,4 +1,5 @@
-"""LLM through a hosted OpenAI-compatible API (Groq Llama by default). Nothing is downloaded, so it runs on Streamlit Cloud.
+"""OPTIONAL hosted LLM (OpenAI-compatible API) for generating new items or grading with an LLM.
+The app works without it: short answers are graded by the free semantic grader and a built-in item bank is included.
 Keys come from Streamlit secrets / environment variables, or from the Model setup page."""
 import os, re, json, time, statistics as st, requests
 
@@ -31,13 +32,13 @@ def ask(system, user, temperature=0.0, model=None, max_new=700):
     if not api_key(): raise RuntimeError(f"No API key for {CFG['provider']}. Add it in Model setup or in Streamlit secrets.")
     body = dict(model=model or PROVIDERS[CFG["provider"]]["model"], temperature=temperature, max_tokens=max_new,
                 messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
-    json_mode = True; wait = 0
+    json_mode = True
     for _ in range(7):
         b = dict(body, **({"response_format": {"type": "json_object"}} if json_mode else {}))
         r = requests.post(f"{base()}/chat/completions", headers={"Authorization": f"Bearer {api_key()}"}, json=b, timeout=90)
         if r.status_code == 400 and json_mode: json_mode = False; continue          # provider without JSON mode
         if r.status_code == 429:
-            wait = min(30, float(r.headers.get("retry-after", 5) or 5)); time.sleep(wait); continue
+            time.sleep(min(30, float(r.headers.get("retry-after", 5) or 5))); continue
         if r.status_code >= 400: raise RuntimeError(f"{r.status_code}: {r.text[:300]}")
         return extract_json(r.json()["choices"][0]["message"]["content"])
     raise RuntimeError("Rate limit: please wait a minute and try again.")
