@@ -29,3 +29,19 @@ scikit-learn
 requests
 textstat
 fastembed          # free embedding model for grading short answers (auto-downloads, no key)
+# Works on Streamlit Community Cloud (Python 3.11) and locally (Python 3.10-3.12).
+# mediapipe 0.10.14 is pinned because newer releases removed the mp.solutions API used here.
+streamlit==1.40.2
+streamlit-webrtc==0.47.9
+streamlit-autorefresh
+mediapipe==0.10.14
+protobuf<5
+opencv-python-headless
+av
+numpy
+pandas
+scikit-learn
+requests
+gpt4all            # optional free local LLM (Llama 3.2 1B etc.), downloads its model automatically
+textstat
+fastembed          # free embedding model for grading short answers (auto-downloads, no key)
