@@ -95,10 +95,9 @@ def cam_status(ctx):
         st.write(("✅ Face detected" if ok else "⚠️ Face not detected reliably") + (f" ({d.ok.mean()*100:.0f}% of recent frames)" if len(d) else ""))
     if st.button("Begin the 20-minute interview", type="primary", disabled=not (ctx.state.playing and ok)):
         S.update(steps=build_steps(S.qs), i=0, ans={}, jobs={}, pool=ThreadPoolExecutor(2), t_start=time.time(), t_step=time.time(), stage="run"); st.rerun()
-    with st.expander("Camera will not connect?"):
-        st.write("Network may be blocking WebRTC. You can continue **without eye tracking** (no eye data will be recorded; for testing only).")
-        if st.button("Begin WITHOUT eye tracking"):
-            S.update(nocam=True, steps=build_steps(S.qs), i=0, ans={}, jobs={}, pool=ThreadPoolExecutor(2), t_start=time.time(), t_step=time.time(), stage="run"); st.rerun()
+    st.markdown("---"); st.write("Camera stuck on the spinner? Your network/host may block WebRTC. You can continue **without eye tracking** (no eye data is recorded; testing only).")
+    if st.button("Begin WITHOUT eye tracking"):
+        S.update(nocam=True, steps=build_steps(S.qs), i=0, ans={}, jobs={}, pool=ThreadPoolExecutor(2), t_start=time.time(), t_step=time.time(), stage="run"); st.rerun()
 
 def candidate():
     st.title("👁️ ScreenFit · 20-minute technical interview")
