@@ -2,8 +2,9 @@
 import sys, os, re, time, types
 sys.path.insert(0, os.getcwd()); os.makedirs("data/sessions", exist_ok=True)
 import numpy as np, pandas as pd, random
-import llm, bank
-llm.load = lambda m=None: None; llm.is_loaded = lambda m=None: True      # no real model in tests
+import llm, bank, semantic
+semantic._M.update(m=None, err="offline")      # skip the real model download in tests
+os.environ["GROQ_API_KEY"] = "test"   # grading key for the app check
 exec(open("tests/test_pipeline.py").read().split("# 1) bank")[0].split("import llm, bank, features, report")[1])  # reuse fake_ask
 src = open("app.py").read()
 src = re.sub(r"def cam\(\):.*?return ctx, ctx.video_processor\n", '''def cam():
@@ -42,6 +43,7 @@ while at.session_state["stage"] == "run" and guard < 60:
     else: at.session_state["t_step"] = time.time() - 999; at.run()
 print("step kinds exercised:", sorted(seen), "| final stage:", at.session_state["stage"])
 assert not at.exception, at.exception
+assert not at.session_state["jobs"] and len(at.session_state["pending"]) == 10, "free grader must run after the interview, not during it"
 assert at.session_state["rep"]["technical"]["overall"] >= 0 and os.path.exists(f"data/sessions/{at.session_state['sid']}.json")
 print("done page + saved session OK:", at.session_state["sid"])
 os.remove(f"data/sessions/{at.session_state['sid']}.json"); os.remove("tests/_app_fake.py"); os.remove("data/bank.json")
