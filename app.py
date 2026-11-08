@@ -90,7 +90,7 @@ def candidate():
             if not ok: st.error("Consent is required."); return
             S.update(meta=dict(level=level, glasses=glasses, screen_hours=hrs, cvsq=cvsq, osdi=osdi), qs=items, seed=seed, sid=uuid.uuid4().hex[:8], stage="camera"); st.rerun()
     elif S.stage == "camera":
-        if S.get("grader", "semantic") == "llm" and not llm.api_key(): st.error("The LLM grader needs an API key. Open **Model setup** (or switch to the free grader)."); return
+        if S.get("grader", "semantic") == "llm" and not llm.ready(): st.error("The selected LLM needs an API key. Open **Model setup** (or switch to the free grader)."); return
         if S.get("grader", "semantic") == "semantic" and not S.get("_warm"):
             with st.spinner("Preparing the free grading model (first use downloads it automatically; please wait)…"): S["_eng"] = semantic.warm()
             S["_warm"] = True
@@ -152,32 +152,37 @@ def run(proc):
 
 
 # ------------------------------------------------------------------ model setup / diagnostics
+NOTES = {"Pollinations (free, no key)": "Hosted free model, **no key**. Best effort (availability can change). Fine for generating items; it is not used for candidate data unless you choose it as the grader.",
+         "Local model (free, GPT4All)": "Runs inside this app on CPU, **no key**. Downloads automatically the first time it is used (about 0.7 GB for the 1B model). Use *List available models* to see other files (for example Llama-3.2-3B-Instruct-Q4_0.gguf on a bigger PC).",
+         "Auto (try the free options)": "Tries, in order: providers whose key you added, then Pollinations (no key), then the local model. Nothing to configure.",
+         "Groq (Llama, free tier)": "Free key: **console.groq.com**. Llama models, fast.", "Cerebras (Llama, free tier)": "Free key: **cloud.cerebras.ai**.",
+         "Google Gemini (free tier)": "Free key: **aistudio.google.com/apikey**.", "Mistral (free tier)": "Free key: **console.mistral.ai** (free experiment plan).",
+         "GitHub Models (free)": "Use a GitHub personal access token (free, rate limited).", "OpenRouter (free models)": "Free key: **openrouter.ai/keys**; pick a model ending in `:free`.",
+         "Hugging Face": "Token: **huggingface.co/settings/tokens** (Inference Providers).", "Custom": "Any OpenAI-compatible server."}
+
 def api_setup():
-    names = list(llm.PROVIDERS)
-    prov = st.selectbox("Provider", names, index=names.index(llm.CFG["provider"]))
+    names = list(llm.PROVIDERS); prov = st.selectbox("Free LLM provider", names, index=names.index(llm.CFG["provider"]))
     if prov != llm.CFG["provider"]: llm.CFG["provider"] = prov; S.model = llm.PROVIDERS[prov]["model"]
-    p = llm.PROVIDERS[prov]
-    if prov == "Custom":
-        p["base"] = st.text_input("Base URL (OpenAI-compatible, ending in /v1)", p["base"])
-    key = st.text_input(f"API key ({p['key']})", value="", type="password", help=f"Or add {p['key']} to .streamlit/secrets.toml / Streamlit Cloud secrets.")
-    if key: llm.CFG["key"] = key.strip()
-    S.model = st.text_input("Model name", S.model or p["model"]).strip() or p["model"]
-    s = llm.status(S.model); c = st.columns(3)
-    c[0].metric("Provider", s["provider"]); c[1].metric("API key", "✅ set" if s["key"] else "❌ missing"); c[2].metric("Model test", S.get("_test", "not run"))
-    st.markdown({"Groq (Llama)": "Free key: **console.groq.com** → API Keys. Llama models, very fast.", "Hugging Face": "Token: **huggingface.co/settings/tokens** (enable *Inference Providers*). Use a non-gated model such as `Qwen/Qwen2.5-7B-Instruct`.",
-                 "OpenRouter": "Key: **openrouter.ai/keys**. Some Llama models are free.", "Custom": "Any OpenAI-compatible server."}[prov])
+    p = llm.PROVIDERS[prov]; st.markdown(NOTES.get(prov, ""))
+    if prov == "Custom": p["base"] = st.text_input("Base URL (OpenAI-compatible, ending in /v1)", p["base"])
+    if llm.needs_key(prov):
+        key = st.text_input(f"API key ({p['key']})", value="", type="password", help=f"Or add {p['key']} to Streamlit secrets.")
+        if key: llm.CFG["key"] = key.strip()
+    if not p.get("auto"): S.model = st.text_input("Model name", S.model or p["model"]).strip() or p["model"]
+    ok = llm.ready(); c = st.columns(3)
+    c[0].metric("Provider", prov.split(" (")[0]); c[1].metric("Ready", "✅" if ok else "❌ key missing"); c[2].metric("Model test", S.get("_test", "not run"))
     c1, c2, c3 = st.columns(3)
-    if c1.button("List available models", disabled=not s["key"]):
+    if c1.button("List available models", disabled=not ok or bool(p.get("auto"))):
         try: ms = llm.list_models(); st.success(f"{len(ms)} models"); st.code("\n".join(ms))
         except Exception as e: st.error(f"Could not list models: {e}")
-    if c2.button("Run JSON test", disabled=not s["key"]):
-        with st.spinner("Asking the model…"):
+    if c2.button("Run JSON test", disabled=not ok):
+        with st.spinner("Asking the model (the local model downloads automatically the first time)…"):
             try: r = llm.ask("Reply with JSON only.", 'Return {"ok": true, "reply": "hello"}', 0, S.model, max_new=40); S["_test"] = "✅ works"; st.success("Model works."); st.json(r)
             except Exception as e: S["_test"] = "❌ failed"; st.error(f"Failed: {e}")
-    if c3.button("Generate one sample item", disabled=not s["key"]):
+    if c3.button("Generate one sample item", disabled=not ok):
         with st.spinner("Generating…"): it = bank.make_item("REST API design", "Data and APIs", S.model)
         if it: st.success(f"Valid item generated ({it['words']} words)"); st.write(it["paragraph"]); st.json(it["questions"])
-        else: st.error("No valid item after 3 tries. Try a larger model (for example llama-3.3-70b-versatile) or generate again.")
+        else: st.error("No valid item after 5 tries. Try another provider, or a larger model.")
 
 def setup():
     st.title("🛠️ Model setup · free local grader (no API key)")
@@ -185,7 +190,7 @@ def setup():
     S.grader = st.radio("Short-answer grader", ["semantic", "llm"], index=0 if S.get("grader", "semantic") == "semantic" else 1, horizontal=True,
                         format_func=lambda x: {"semantic": "Free semantic grader (default, no key)", "llm": "LLM through an API key (optional)"}[x])
     c = st.columns(3); started = semantic._M["m"] is not None or semantic._M["err"] is not None
-    c[0].metric("Grader engine", semantic.engine() if started else "not loaded yet"); c[1].metric("Question bank", f"{len(bank.load())} items"); c[2].metric("LLM key", "set" if llm.api_key() else "not set (optional)")
+    c[0].metric("Grader engine", semantic.engine() if started else "not loaded yet"); c[1].metric("Question bank", f"{len(bank.load())} items"); c[2].metric("LLM for generation", llm.CFG["provider"].split(" (")[0])
     if st.button("Load the free grading model now"):
         with st.spinner("Loading (first use downloads ~130 MB automatically)…"): eng = semantic.warm()
         (st.success if semantic._M["m"] is not None else st.warning)(f"Engine: {eng}" + ("" if semantic._M["m"] is not None else f" (model unavailable: {semantic._M['err']}; keyword scoring still works)"))
@@ -195,20 +200,19 @@ def setup():
     st.caption(f"Model answer: {q['key']}"); ans = st.text_input("Type an answer to test", "")
     if st.button("Grade this answer"):
         r = grader.grade(q, ans, S.grader, S.model); st.metric("Score (0-1)", r["score"] if r.get("score") is not None else "error"); st.json({k: v for k, v in r.items() if k != "score"})
-    with st.expander("Optional: LLM API (generate more items, or grade with an LLM)"): api_setup()
+    with st.expander("Free LLMs: generate more items (or grade with an LLM)", expanded=True): api_setup()
 
 # ------------------------------------------------------------------ admin
 def admin():
     st.title("🗂️ Item bank (admin)")
-    s = llm.status(S.model)
-    st.info(f"Model: `{S.model}` via {s['provider']} · API key: {'set' if s['key'] else 'MISSING'}. Change it in **Model setup**.")
-    ms = [S.model] if s["key"] else []
-    if not s["key"]: st.info("Optional: add an API key in **Model setup** to generate more items. A built-in bank of 23 curated items is already available.")
+    ms = [S.model] if llm.ready() else []
+    st.info(f"Item generator: **{llm.CFG['provider']}** (change it in **Model setup**). The 23 built-in items are already approved; generating more is optional.")
+    if not ms: st.warning("The selected provider needs an API key. Choose *Auto* or *Pollinations* (no key), or add the key in Model setup.")
     b = bank.load(); cov = bank.coverage(b); st.write("**Approved items per cluster**"); st.bar_chart(pd.Series(cov, name="approved"))
     if b: st.download_button("⬇ Download bank.json (back it up: Streamlit Cloud storage is temporary)", json.dumps(b, indent=1), "bank.json", "application/json")
     up = st.file_uploader("Restore a saved bank.json", type="json")
     if up and st.button("Replace the bank with the uploaded file"): bank.save(json.load(up)); st.rerun()
-    with st.expander("Generate new items with Llama", expanded=not b):
+    with st.expander("Generate new items with a free LLM", expanded=not b):
         cl = st.multiselect("Clusters", list(bank.CLUSTERS), default=list(bank.CLUSTERS)); n = st.slider("Items per area", 1, 5, 1)
         if st.button("Generate", type="primary", disabled=not ms):
             areas = [(a, c) for c in cl for a in bank.CLUSTERS[c]] * n; bar = st.progress(0.0); made = 0
