@@ -13,7 +13,9 @@ def get_rtc():
     """STUN by default. On Streamlit Cloud add TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN secrets for a TURN server (more reliable)."""
     c = S.get("_rtc")
     if c and time.time() - c[0] < 3000: return c[1]
-    cfg = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+    cfg = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]},      # public relay fallback (best effort); set TURN_URL/TURN_USERNAME/TURN_CREDENTIAL or Twilio for a reliable one
+                          {"urls": ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443", "turns:openrelay.metered.ca:443?transport=tcp"], "username": "openrelayproject", "credential": "openrelayproject"}]}
+    if os.getenv("TURN_URL"): cfg["iceServers"].append({"urls": [os.getenv("TURN_URL")], "username": os.getenv("TURN_USERNAME", ""), "credential": os.getenv("TURN_CREDENTIAL", "")})
     sid, tok = os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN")
     if sid and tok:
         try:
@@ -56,6 +58,15 @@ def advance(timeout=False):
     S.i += 1; S.t_step = time.time()
 
 def cam():
+    """Camera source. Default: eye capture inside the browser (no WebRTC server, no TURN, video never leaves the device)."""
+    if S.get("capture", "browser") == "browser":
+        import types, eyecomp
+        if not isinstance(S.get("eye"), eyecomp.BrowserEyes): S.eye = eyecomp.BrowserEyes()
+        with st.sidebar:
+            st.markdown("### Camera (eye numbers only, nothing is recorded)")
+            eyecomp.render(S.eye)
+            if S.eye.error: st.error(f"Camera/eye model problem: {S.eye.error}. Allow the camera, use Chrome or Edge, or switch to *Server (WebRTC)* on the camera page.")
+        return types.SimpleNamespace(state=types.SimpleNamespace(playing=S.eye.playing)), S.eye
     try:
         from streamlit_webrtc import webrtc_streamer
         import eyes
@@ -95,7 +106,7 @@ def candidate():
     if S.stage == "pre":
         st.subheader("Pre-session form (not counted in the 20 minutes)")
         with st.form("pre_form"):
-            ok = st.checkbox("I have read the information sheet and agree to take part. My webcam video is analysed in memory by this application (on this computer, or on the hosting server if the app is online); no video is recorded or stored (only eye-measurement numbers such as EAR and blink counts are kept); this is not a medical diagnosis; I may withdraw at any time.")
+            ok = st.checkbox("I have read the information sheet and agree to take part. My webcam is analysed inside my browser (default) or, if I choose server capture, in memory on the server; video is never recorded or stored (only eye-measurement numbers such as EAR and blink counts are kept); this is not a medical diagnosis; I may withdraw at any time.")
             c1, c2, c3 = st.columns(3)
             level = c1.selectbox("Role level", ["Junior", "Mid-level", "Senior"]); glasses = c2.checkbox("I wear glasses"); hrs = c3.number_input("Screen hours per day", 0.0, 16.0, 8.0, 0.5)
             st.markdown("Complete the official **CVS-Q** and **OSDI** questionnaires and enter your total scores:")
@@ -110,6 +121,8 @@ def candidate():
     elif S.stage == "camera":
         if S.get("grader", "semantic") == "llm" and not llm.ready(): st.error("The selected LLM needs an API key. Open **Model setup** (or switch to the free grader)."); return
         st.caption("Short-answer grader: " + ("free semantic grader (loaded after the interview)" if S.get("grader", "semantic") == "semantic" else f"LLM · {llm.CFG['provider']}"))
+        S.capture = st.radio("Camera capture", ["browser", "server"], index=0 if S.get("capture", "browser") == "browser" else 1, horizontal=True,
+                             format_func=lambda x: {"browser": "Browser (recommended: video stays on your device)", "server": "Server (WebRTC, needs a TURN server online)"}[x])
         ctx, proc = cam(); st_autorefresh(1500, key="camtick")
         st.subheader("Camera check"); st.write("Click **START** in the sidebar, allow the camera, face the screen with front lighting, and sit about 60 cm away.")
         ok = False
@@ -124,7 +137,7 @@ def candidate():
     else:
         st.success("Interview complete. Thank you!"); report.render(S.rep, candidate=True)
         if st.button("Start a new session"):
-            for k in ["qs", "steps", "ans", "jobs", "pending", "rep", "post", "meta"]: S.pop(k, None)
+            for k in ["qs", "steps", "ans", "jobs", "pending", "eye", "rep", "post", "meta"]: S.pop(k, None)
             S.stage = "pre"; st.rerun()
 
 def run(proc):
