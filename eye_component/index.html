@@ -1,0 +1,48 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+ body{margin:0;font:13px system-ui,sans-serif;color:#1c2740}
+ video{width:100%;border-radius:8px;background:#111;transform:scaleX(-1);display:block}
+ button{background:#ff4b4b;color:#fff;border:0;border-radius:8px;padding:8px 16px;font:inherit;cursor:pointer;margin-top:8px}
+ button:disabled{opacity:.5;cursor:default} #msg{margin-left:8px}
+</style></head><body>
+<video id="v" autoplay muted playsinline></video>
+<button id="b">START camera</button><span id="msg">Camera is off. Eye numbers only; nothing is recorded.</span>
+<script src="geometry.js"></script>
+<script type="module">
+const send = (type, extra = {}) => window.parent.postMessage({ isStreamlitMessage: true, type, ...extra }, "*");
+const v = document.getElementById("v"), btn = document.getElementById("b"), msgEl = document.getElementById("msg");
+let args = { label: "idle", tx: null, ty: null, ack: 0 }, buf = [], idx = 0, playing = false, errors = 0, error = "", landmarker = null, lastV = -1;
+const setMsg = (m) => { msgEl.textContent = m; };
+window.addEventListener("message", (e) => {
+  if (e.data && e.data.type === "streamlit:render") {
+    args = e.data.args || args; const ack = args.ack || 0;
+    while (buf.length && buf[0].i <= ack) buf.shift();                    // Python confirmed these rows: drop them
+  }
+});
+send("streamlit:componentReady", { apiVersion: 1 }); send("streamlit:setFrameHeight", { height: 285 });
+function flush() { send("streamlit:setComponentValue", { value: { playing, errors, error, rows: buf.slice(0, 400) }, dataType: "json" }); }
+function loop() {
+  if (v.currentTime !== lastV) {
+    lastV = v.currentTime; let r = { ok: 0 };
+    try { const res = landmarker.detectForVideo(v, performance.now()); if (res.faceLandmarks && res.faceLandmarks[0]) r = window.EYE.row(res.faceLandmarks[0]); }
+    catch (e) { errors++; }
+    buf.push({ i: ++idx, t: (performance.timeOrigin + performance.now()) / 1000, label: args.label, tx: args.tx, ty: args.ty, ...r });
+    if (buf.length > 3000) buf.splice(0, buf.length - 3000);
+  }
+  if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(loop); else requestAnimationFrame(loop);
+}
+btn.onclick = async () => {
+  btn.disabled = true;
+  try {
+    setMsg("Loading the eye model…");
+    const V = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+    const { FaceLandmarker, FilesetResolver } = await import(V + "/vision_bundle.mjs");
+    const fileset = await FilesetResolver.forVisionTasks(V + "/wasm");
+    landmarker = await FaceLandmarker.createFromOptions(fileset, { runningMode: "VIDEO", numFaces: 1,
+      baseOptions: { delegate: "CPU", modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task" } });
+    setMsg("Starting the camera…");
+    v.srcObject = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } }, audio: false });
+    await v.play(); playing = true; setMsg("Eye tracking on"); btn.style.display = "none"; loop(); setInterval(flush, 1000);
+  } catch (e) { error = String(e.message || e); setMsg("Could not start: " + error); btn.disabled = false; flush(); }
+};
+</script></body></html>
