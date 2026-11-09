@@ -38,6 +38,9 @@ def build_steps(items):
         s += [dict(k="q", p=p, q=q, dur=QDUR[items[p]["questions"][q]["type"]]) for q in range(5)]
     return s + [dict(k="post", dur=105), dict(k="wrap", dur=60)]          # sums to 1200 s
 
+def bg_grade():
+    return S.get("grader", "semantic") == "llm" and llm.CFG["provider"] not in (llm.AUTO, llm.LOCAL)
+
 def advance(timeout=False):
     stp = S.steps[S.i]
     if stp["k"] == "q":
@@ -47,7 +50,9 @@ def advance(timeout=False):
             elif q["type"] == "tf": val = (raw == "True")
             else: val = raw.strip()
         S.ans[key] = dict(val=val, timed_out=bool(timeout and val is None))
-        if q["type"] == "short" and val: S.jobs[key] = S.pool.submit(grader.grade, q, val, S.get("grader", "semantic"), S.model)
+        if q["type"] == "short" and val:
+            if bg_grade(): S.jobs[key] = S.pool.submit(grader.grade, q, val, S.get("grader", "semantic"), S.model)   # hosted LLM: grade while the candidate continues
+            else: S.pending[key] = (q, val)                                                                        # free/local grader: after the interview, so the camera has the CPU and memory
     S.i += 1; S.t_step = time.time()
 
 def cam():
@@ -60,17 +65,26 @@ def cam():
     with st.sidebar:
         st.markdown("### Webcam (live preview only, nothing is recorded)")
         ctx = webrtc_streamer(key="eye", video_processor_factory=eyes.EyeProcessor, rtc_configuration=get_rtc(),
-                              media_stream_constraints={"video": {"width": 480, "height": 360}, "audio": False})
+                              media_stream_constraints={"video": {"width": {"ideal": 320}, "height": {"ideal": 240}, "frameRate": {"ideal": 20, "max": 24}}, "audio": False},
+                              async_processing=True)
     return ctx, ctx.video_processor
 
 def finalize(proc):
     feats = None
     try: feats = features.compute(proc.df()) if proc is not None else None
     except Exception as e: st.warning(f"Eye analysis failed: {e}")
+    if proc is not None and hasattr(proc, "release"): proc.release()          # free MediaPipe before any heavy grading model loads
     grades = {}
     for k, f in S.jobs.items():
         try: grades[k] = f.result(timeout=120)
         except Exception: grades[k] = None
+    pend = S.get("pending", {})
+    if pend:
+        bar = st.progress(0.0, text="Grading short answers…")
+        for n, (k, (q, val)) in enumerate(pend.items()):
+            try: grades[k] = grader.grade(q, val, S.get("grader", "semantic"), S.model)
+            except Exception: grades[k] = None
+            bar.progress((n + 1) / len(pend), text=f"Grading short answers {n + 1}/{len(pend)}")
     S.meta["grader"] = semantic.engine() if S.get("grader", "semantic") == "semantic" else f"LLM {S.model}"
     rep = report.build(S.sid, S.seed, S.meta, S.qs, S.ans, grades, feats, S.get("post", {}))
     json.dump(rep, open(f"data/sessions/{S.sid}.json", "w"), indent=1); S.rep = rep; S.stage = "done"
@@ -95,24 +109,22 @@ def candidate():
             S.update(meta=dict(level=level, glasses=glasses, screen_hours=hrs, cvsq=cvsq, osdi=osdi), qs=items, seed=seed, sid=uuid.uuid4().hex[:8], stage="camera"); st.rerun()
     elif S.stage == "camera":
         if S.get("grader", "semantic") == "llm" and not llm.ready(): st.error("The selected LLM needs an API key. Open **Model setup** (or switch to the free grader)."); return
-        if S.get("grader", "semantic") == "semantic" and not S.get("_warm"):
-            with st.spinner("Preparing the free grading model (first use downloads it automatically; please wait)…"): S["_eng"] = semantic.warm()
-            S["_warm"] = True
-        st.caption(f"Short-answer grader: {S.get('_eng', 'LLM API')}")
+        st.caption("Short-answer grader: " + ("free semantic grader (loaded after the interview)" if S.get("grader", "semantic") == "semantic" else f"LLM · {llm.CFG['provider']}"))
         ctx, proc = cam(); st_autorefresh(1500, key="camtick")
         st.subheader("Camera check"); st.write("Click **START** in the sidebar, allow the camera, face the screen with front lighting, and sit about 60 cm away.")
         ok = False
         if proc is not None:
             d = proc.df().tail(45); ok = len(d) > 10 and d.ok.mean() > 0.9
             st.write(("✅ Face detected" if ok else "⚠️ Face not detected reliably") + (f" ({d.ok.mean()*100:.0f}% of recent frames)" if len(d) else ""))
+            st.caption(f"Camera diagnostics: frames received {getattr(proc, 'received', 0)} · frame errors {getattr(proc, 'errors', 0)} (if 'received' stays at 0 after START, the browser could not connect: see the README)")
         if st.button("Begin the 20-minute interview", type="primary", disabled=not (ctx.state.playing and ok)):
-            S.update(steps=build_steps(S.qs), i=0, ans={}, jobs={}, pool=ThreadPoolExecutor(2), t_start=time.time(), t_step=time.time(), stage="run"); st.rerun()
+            S.update(steps=build_steps(S.qs), i=0, ans={}, jobs={}, pending={}, pool=ThreadPoolExecutor(2), t_start=time.time(), t_step=time.time(), stage="run"); st.rerun()
     elif S.stage == "run":
         ctx, proc = cam(); st_autorefresh(1000, key="tick"); run(proc)
     else:
         st.success("Interview complete. Thank you!"); report.render(S.rep, candidate=True)
         if st.button("Start a new session"):
-            for k in ["qs", "steps", "ans", "jobs", "rep", "post", "meta"]: S.pop(k, None)
+            for k in ["qs", "steps", "ans", "jobs", "pending", "rep", "post", "meta"]: S.pop(k, None)
             S.stage = "pre"; st.rerun()
 
 def run(proc):
