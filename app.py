@@ -123,7 +123,7 @@ def candidate():
         st.caption("Short-answer grader: " + ("free semantic grader (loaded after the interview)" if S.get("grader", "semantic") == "semantic" else f"LLM · {llm.CFG['provider']}"))
         S.capture = st.radio("Camera capture", ["browser", "server"], index=0 if S.get("capture", "browser") == "browser" else 1, horizontal=True,
                              format_func=lambda x: {"browser": "Browser (recommended: video stays on your device)", "server": "Server (WebRTC, needs a TURN server online)"}[x])
-        ctx, proc = cam(); st_autorefresh(1500, key="camtick")
+        ctx, proc = cam(); st_autorefresh(3000 if S.get("capture", "browser") == "browser" else 1500, key="camtick")
         st.subheader("Camera check"); st.write("Click **START** in the sidebar, allow the camera, face the screen with front lighting, and sit about 60 cm away.")
         ok = False
         if proc is not None:
@@ -133,7 +133,11 @@ def candidate():
         if st.button("Begin the 20-minute interview", type="primary", disabled=not (ctx.state.playing and ok)):
             S.update(steps=build_steps(S.qs), i=0, ans={}, jobs={}, pending={}, pool=ThreadPoolExecutor(2), t_start=time.time(), t_step=time.time(), stage="run"); st.rerun()
     elif S.stage == "run":
-        ctx, proc = cam(); st_autorefresh(1000, key="tick"); run(proc)
+        wrap = S.steps[S.i]["k"] == "wrap"; browser = S.get("capture", "browser") == "browser"
+        if wrap and browser: proc = S.get("eye")                       # unmount the camera widget: no reruns while the answers are graded
+        else: ctx, proc = cam()
+        if not wrap: st_autorefresh(4000 if browser else 1000, key="tick")      # the browser camera already ticks every second; this is only a safety net
+        run(proc)
     else:
         st.success("Interview complete. Thank you!"); report.render(S.rep, candidate=True)
         if st.button("Start a new session"):
