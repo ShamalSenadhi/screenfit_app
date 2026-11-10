@@ -28,21 +28,26 @@ at.checkbox[0].check(); at.run()
 [bt for bt in at.button if "Continue" in bt.label][0].click().run(); assert not at.exception, at.exception
 assert at.session_state["stage"] == "camera", at.session_state["stage"]
 [bt for bt in at.button if "Begin" in bt.label][0].click().run(); assert at.session_state["stage"] == "run"
-steps = at.session_state["steps"]; assert sum(s["dur"] for s in steps) == 1152, sum(s["dur"] for s in steps)   # set-up 45 + calib 72 + baseline 45 + 5x165 + post 105 + wrap 60
-print("steps:", len(steps), "total", sum(s["dur"] for s in steps), "s; question types per paragraph:", [s["dur"] for s in steps if s["k"] == "q"][:5])
-# walk every step by answering via widgets (early advance) and by forcing time-outs
-seen = set(); guard = 0
-while at.session_state["stage"] == "run" and guard < 60:
+steps = at.session_state["steps"]; want = 30 + 9 * 7 + 45 + 5 * (35 + 20 + 20 + 20 + 35 + 35) + 105 + 60
+assert sum(s["dur"] for s in steps) == want == 1128, sum(s["dur"] for s in steps)
+print("steps:", len(steps), "total", sum(s["dur"] for s in steps), "s; setup/calibration/baseline:", [s["dur"] for s in steps[:3]], "; question timers:", [s["dur"] for s in steps if s["k"] == "q"][:5])
+# walk every step: questions advance ONLY with the Submit / Skip buttons (or the time-out); grading happens after the interview
+click = lambda name: [b for b in at.button if name in b.label][0].click().run()
+seen = set(); guard = 0; checked_empty = False; n_skip = n_timeout = n_sub = 0
+while at.session_state["stage"] == "run" and guard < 90:
     guard += 1; i = at.session_state["i"]; k = steps[i]["k"]; seen.add(k); assert not at.exception, (k, at.exception)
     if k == "q":
         q = at.session_state["qs"][steps[i]["p"]]["questions"][steps[i]["q"]]
-        sub = [bt for bt in at.button if bt.label == "Submit"][0]
-        if q["type"] == "short": at.text_input[0].set_value("a lock prevents two threads racing"); sub.click().run()      # answer only counts after Submit
-        elif i % 2: at.radio[0].set_value(at.radio[0].options[0]); sub.click().run()
-        else: at.session_state["t_step"] = time.time() - 999; at.run()      # force a time-out
-    elif k == "post": [bt for bt in at.button if "Submit" in bt.label][0].click().run()
+        if not checked_empty:                                   # Submit with nothing chosen: stays on the same question and warns
+            click("Submit answer"); assert at.session_state["i"] == i and any("choose or type" in w.value for w in at.warning), [w.value for w in at.warning]; checked_empty = True
+        if q["type"] == "short": at.text_input[0].set_value("a lock prevents two threads racing"); at.run(); click("Submit answer"); n_sub += 1
+        elif i % 3 == 0: at.session_state["t_step"] = time.time() - 999; at.run(); n_timeout += 1             # time-out
+        elif i % 3 == 1: at.radio[0].set_value(at.radio[0].options[0]); at.run(); assert at.session_state["i"] == i, "selecting must not advance"; click("Submit answer"); n_sub += 1
+        else: click("Skip"); n_skip += 1
+        assert at.session_state["i"] == i + 1, (k, i)
+    elif k == "post": click("Submit")
     else: at.session_state["t_step"] = time.time() - 999; at.run()
-print("step kinds exercised:", sorted(seen), "| final stage:", at.session_state["stage"])
+print("step kinds exercised:", sorted(seen), f"| submitted {n_sub}, skipped {n_skip}, timed out {n_timeout} | final stage:", at.session_state["stage"])
 assert not at.exception, at.exception
 assert not at.session_state["jobs"] and len(at.session_state["pending"]) == 10, "free grader must run after the interview, not during it"
 assert at.session_state["rep"]["technical"]["overall"] >= 0 and os.path.exists(f"data/sessions/{at.session_state['sid']}.json")
