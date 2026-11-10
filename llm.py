@@ -35,9 +35,24 @@ def ready(name=None):
     name = name or CFG["provider"]; return True if (spec(name).get("auto") or not needs_key(name)) else bool(key_for(name))
 def status(model_id=None):
     p = spec(); return dict(provider=CFG["provider"], model=model_id or p["model"], key=ready(), needs_key=needs_key(), local=bool(p.get("local")), loaded=is_loaded())
-def auto_chain():
-    keyed = [n for n in PROVIDERS if needs_key(n) and n != "Custom" and key_for(n)]
-    return keyed + [POLL, LOCAL]
+def mem_limit_gb():
+    """Memory this app may use (container limit if there is one, else the machine's RAM)."""
+    for p in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            v = open(p).read().strip()
+            if v.isdigit() and int(v) < 1 << 50: return int(v) / 1e9
+        except Exception: pass
+    try: return int(open("/proc/meminfo").readline().split()[1]) / 1e6
+    except Exception: return 0.0
+
+_dead = {}                                   # provider -> time of its last failure (skipped for 5 minutes)
+def reset_dead(): _dead.clear()
+def auto_chain(local_ok=True):
+    """Providers tried by Auto: your keyed free tiers, Pollinations, then the local model (only if the machine has >= 3.5 GB RAM or it is already loaded)."""
+    alive = lambda n: time.time() - _dead.get(n, 0) > 300
+    chain = [n for n in [m for m in PROVIDERS if needs_key(m) and m != "Custom" and key_for(m)] + [POLL] if alive(n)]
+    if local_ok and alive(LOCAL) and (is_loaded() or mem_limit_gb() >= 3.5): chain.append(LOCAL)
+    return chain
 
 # ---- local model (GPT4All) ----
 def is_loaded(model=None): return (model or LOCAL_MODEL) in _M
@@ -62,7 +77,7 @@ def _local(system, user, temperature, model, max_new):
     with _gen_lock, g.chat_session(system_prompt=system):
         return extract_json(g.generate(user, max_tokens=max_new, temp=max(temperature, 0.01), top_p=0.9))
 
-def _http(name, system, user, temperature, model, max_new):
+def _http(name, system, user, temperature, model, max_new, timeout=120):
     p = spec(name); key = key_for(name)
     if p.get("key") and not key: raise RuntimeError(f"No API key for {name}")
     url = p.get("url") or p["base"].rstrip("/") + "/chat/completions"
@@ -71,24 +86,24 @@ def _http(name, system, user, temperature, model, max_new):
                 messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
     json_mode = True
     for _ in range(7):
-        r = requests.post(url, headers=headers, json=dict(body, **({"response_format": {"type": "json_object"}} if json_mode else {})), timeout=120)
+        r = requests.post(url, headers=headers, json=dict(body, **({"response_format": {"type": "json_object"}} if json_mode else {})), timeout=timeout)
         if r.status_code == 400 and json_mode: json_mode = False; continue          # provider without JSON mode
         if r.status_code == 429: time.sleep(min(30, float(r.headers.get("retry-after", 5) or 5))); continue
         if r.status_code >= 400: raise RuntimeError(f"{r.status_code}: {r.text[:200]}")
         return extract_json(r.json()["choices"][0]["message"]["content"])
     raise RuntimeError("Rate limit: please wait a minute and try again.")
 
-def _one(name, system, user, temperature, model, max_new):
-    return _local(system, user, temperature, model, max_new) if spec(name).get("local") else _http(name, system, user, temperature, model, max_new)
+def _one(name, system, user, temperature, model, max_new, timeout=120):
+    return _local(system, user, temperature, model, max_new) if spec(name).get("local") else _http(name, system, user, temperature, model, max_new, timeout)
 
-def ask(system, user, temperature=0.0, model=None, max_new=700):
+def ask(system, user, temperature=0.0, model=None, max_new=700, local_ok=True, timeout=120):
     """Chat once and return the first JSON object in the reply. Auto mode tries each free option in turn."""
     name = CFG["provider"]
     if spec(name).get("auto"):
         errs = []
-        for n in auto_chain():
-            try: return _one(n, system, user, temperature, None, max_new)
-            except Exception as e: errs.append(f"{n.split(' (')[0]}: {str(e)[:100]}")
+        for n in auto_chain(local_ok):
+            try: out = _one(n, system, user, temperature, None, max_new, timeout); _dead.pop(n, None); return out
+            except Exception as e: _dead[n] = time.time(); errs.append(f"{n.split(' (')[0]}: {str(e)[:100]}")
         raise RuntimeError("All free options failed -> " + " | ".join(errs))
     return _one(name, system, user, temperature, None if model in (None, "auto") else model, max_new)
 
@@ -115,7 +130,7 @@ def grade_short(q, answer, runs=3, model=None):
     res = []
     for _ in range(runs):
         try:
-            g = ask(GRADE_SYS, user, 0.2, model, max_new=120)
+            g = ask(GRADE_SYS, user, 0.2, model, max_new=120, local_ok=is_loaded(), timeout=40)      # grading never downloads a local model
             res.append((min(2, max(0, int(g["correctness"]))), min(2, max(0, int(g["completeness"]))), g.get("justification", "")))
         except Exception: pass
     if not res: return {"score": None, "error": True, "runs": 0, "agree": False}
