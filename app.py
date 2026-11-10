@@ -25,7 +25,9 @@ def get_rtc():
         except Exception: pass
     S["_rtc"] = (time.time(), cfg); return cfg
 GRID = [(x, y) for y in (0.1, 0.5, 0.9) for x in (0.1, 0.5, 0.9)]
-TOTAL = 1200; READ_S = 35; QDUR = {"mcq": 20, "tf": 20, "short": 35}
+SETUP_S, CAL_DOT_S, BASE_S = 45, 8, 45          # shorter initial phases (was 60 / 90 / 60); calibration = 9 dots x 8 s = 72 s
+CALIB_S = 9 * CAL_DOT_S; READ_S = 35; QDUR = {"mcq": 20, "tf": 20, "short": 35}; POST_S, WRAP_S = 105, 60
+TOTAL = SETUP_S + CALIB_S + BASE_S + 5 * (READ_S + 2 * QDUR["mcq"] + QDUR["tf"] + 2 * QDUR["short"]) + POST_S + WRAP_S      # 1152 s
 NEUTRAL = ("Please read this neutral text silently at your normal pace. Rivers carry water from high ground to the sea. "
            "Along the way they shape valleys, feed forests and provide a path for travellers. Seasons change the flow: spring brings "
            "fast water, summer slows it, and autumn leaves gather along the banks. Keep your head still and your eyes on the screen.")
@@ -34,14 +36,11 @@ S.setdefault("stage", "pre"); S.setdefault("model", llm.MODEL)
 
 
 def build_steps(items):
-    s = [dict(k="setup", dur=60), dict(k="calib", dur=90), dict(k="baseline", dur=60)]
+    s = [dict(k="setup", dur=SETUP_S), dict(k="calib", dur=CALIB_S), dict(k="baseline", dur=BASE_S)]
     for p in range(5):
         s.append(dict(k="read", p=p, dur=READ_S))
         s += [dict(k="q", p=p, q=q, dur=QDUR[items[p]["questions"][q]["type"]]) for q in range(5)]
-    return s + [dict(k="post", dur=105), dict(k="wrap", dur=60)]          # sums to 1200 s
-
-def bg_grade():
-    return S.get("grader", "semantic") == "llm" and llm.CFG["provider"] not in (llm.AUTO, llm.LOCAL)
+    return s + [dict(k="post", dur=POST_S), dict(k="wrap", dur=WRAP_S)]          # sums to TOTAL
 
 def advance(timeout=False):
     stp = S.steps[S.i]
@@ -52,9 +51,7 @@ def advance(timeout=False):
             elif q["type"] == "tf": val = (raw == "True")
             else: val = raw.strip()
         S.ans[key] = dict(val=val, timed_out=bool(timeout and val is None))
-        if q["type"] == "short" and val:
-            if bg_grade(): S.jobs[key] = S.pool.submit(grader.grade, q, val, S.get("grader", "semantic"), S.model)   # hosted LLM: grade while the candidate continues
-            else: S.pending[key] = (q, val)                                                                        # free/local grader: after the interview, so the camera has the CPU and memory
+        if q["type"] == "short" and val: S.pending[key] = (q, val)        # every short answer is graded only after the interview is over (camera keeps the CPU and memory)
     S.i += 1; S.t_step = time.time()
 
 def cam():
@@ -102,9 +99,9 @@ def finalize(proc):
 
 # ------------------------------------------------------------------ candidate
 def candidate():
-    st.title("👁️ ScreenFit · 20-minute technical interview")
+    st.title("👁️ ScreenFit · 19-minute technical interview")
     if S.stage == "pre":
-        st.subheader("Pre-session form (not counted in the 20 minutes)")
+        st.subheader("Pre-session form (not counted in the interview time)")
         with st.form("pre_form"):
             ok = st.checkbox("I have read the information sheet and agree to take part. My webcam is analysed inside my browser (default) or, if I choose server capture, in memory on the server; video is never recorded or stored (only eye-measurement numbers such as EAR and blink counts are kept); this is not a medical diagnosis; I may withdraw at any time.")
             c1, c2, c3 = st.columns(3)
@@ -130,7 +127,7 @@ def candidate():
             d = proc.df().tail(45); ok = len(d) > 10 and d.ok.mean() > 0.9
             st.write(("✅ Face detected" if ok else "⚠️ Face not detected reliably") + (f" ({d.ok.mean()*100:.0f}% of recent frames)" if len(d) else ""))
             st.caption(f"Camera diagnostics: frames received {getattr(proc, 'received', 0)} · frame errors {getattr(proc, 'errors', 0)} (if 'received' stays at 0 after START, the browser could not connect: see the README)")
-        if st.button("Begin the 20-minute interview", type="primary", disabled=not (ctx.state.playing and ok)):
+        if st.button("Begin the interview", type="primary", disabled=not (ctx.state.playing and ok)):
             S.update(steps=build_steps(S.qs), i=0, ans={}, jobs={}, pending={}, pool=ThreadPoolExecutor(2), t_start=time.time(), t_step=time.time(), stage="run"); st.rerun()
     elif S.stage == "run":
         ctx, proc = cam(); st_autorefresh(1000, key="tick"); run(proc)
@@ -151,7 +148,7 @@ def run(proc):
         proc.label = "setup"; d = proc.df().tail(60); st.subheader("1 · Set-up check")
         st.write(f"Face detected: **{d.ok.mean()*100:.0f}%**" if len(d) else "No frames yet"); st.write("Keep your head centred, light in front of you, no strong light behind you.")
     elif k == "calib":
-        sub = min(8, int(el // 10)); proc.label = "calib"; proc.target = GRID[sub]
+        sub = min(8, int(el // CAL_DOT_S)); proc.label = "calib"; proc.target = GRID[sub]
         st.subheader(f"2 · Gaze calibration — look at the dot ({sub + 1}/9)")
         cells = "".join(f"<div style='display:flex;align-items:center;justify-content:center;height:90px'><div style='width:{36 if n == sub else 12}px;height:{36 if n == sub else 12}px;border-radius:50%;background:{'#d64545' if n == sub else '#c5cde0'}'></div></div>" for n in range(9))
         st.markdown(f"<div style='display:grid;grid-template-columns:repeat(3,1fr);border:1px dashed #ccd;border-radius:12px;padding:20px'>{cells}</div>", unsafe_allow_html=True)
@@ -164,10 +161,12 @@ def run(proc):
     elif k == "q":
         p, qi = stp["p"], stp["q"]; q = S.qs[p]["questions"][qi]; proc.label = f"q{p + 1}"; key = f"a_{S.i}"
         st.subheader(f"Paragraph {p + 1} · Question {qi + 1} of 5"); st.write(f"**{q['text']}**")
-        if q["type"] == "mcq": st.radio("Choose one", [f"{'ABCD'[n]}. {o}" for n, o in enumerate(q["options"])], index=None, key=key, on_change=advance)
-        elif q["type"] == "tf": st.radio("True or false?", ["True", "False"], index=None, horizontal=True, key=key, on_change=advance)
-        else: st.text_input("Answer in at most 20 words, then press Enter", max_chars=160, key=key, on_change=advance)
-        st.caption("The paragraph is no longer shown. Answers are final once submitted.")
+        with st.form(f"qf_{S.i}"):          # nothing is recorded until the small Submit button is pressed; if time runs out the question is skipped
+            if q["type"] == "mcq": st.radio("Choose one", [f"{'ABCD'[n]}. {o}" for n, o in enumerate(q["options"])], index=None, key=key)
+            elif q["type"] == "tf": st.radio("True or false?", ["True", "False"], index=None, horizontal=True, key=key)
+            else: st.text_input("Answer in at most 20 words", max_chars=160, key=key)
+            st.form_submit_button("Submit", on_click=advance)
+        st.caption("The paragraph is no longer shown. Press **Submit** to lock in your answer; if you do not, the question is skipped when the time ends.")
     elif k == "post":
         proc.label = "post"; st.subheader("Post-task questions")
         with st.form("post_form"):
@@ -176,7 +175,7 @@ def run(proc):
             if st.form_submit_button("Submit", type="primary"): S.post = dict(tlx=round(float(np.mean(tl)), 1), strain=strain); advance(); st.rerun()
     else:  # wrap
         proc.label = "post"
-        with st.spinner("Scoring answers (Llama) and analysing eye signals…"): finalize(proc)
+        with st.spinner("Interview over: grading your answers and analysing eye signals…"): finalize(proc)
         st.rerun()
 
 
