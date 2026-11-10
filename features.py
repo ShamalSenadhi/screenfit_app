@@ -42,7 +42,7 @@ def fit_gaze(df):
     c = df[(df.label == "calib") & (df.ok == 1) & df.tx.notna()].copy()
     if c.empty: return None, np.nan
     c["chg"] = (c[["tx", "ty"]] != c[["tx", "ty"]].shift()).any(axis=1).cumsum()
-    c = c[c.t - c.groupby("chg").t.transform("min") > 3]          # drop settling time after each dot
+    c = c[c.t - c.groupby("chg").t.transform("min") > 2]          # drop settling time after each dot
     if len(c) < 60 or c.chg.nunique() < 5: return None, np.nan
     m = make_pipeline(PolynomialFeatures(2), Ridge(1.0)); Y = c[["tx", "ty"]].values
     pred = cross_val_predict(m, c[F], Y, cv=GroupKFold(min(5, c.chg.nunique())), groups=c.chg)
