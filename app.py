@@ -1,13 +1,16 @@
 """ScreenFit - LLM interview (Llama via hosted API) + webcam eye screening. Run:  streamlit run app.py"""
-import os, glob, json, time, random, uuid
+import os, re, glob, json, time, random, uuid
 import numpy as np, pandas as pd, streamlit as st
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from streamlit_autorefresh import st_autorefresh
 import bank, llm, features, report, grader, semantic
+try: import export
+except ImportError as _e: export = None; _export_err = _e
 
 st.set_page_config(page_title="ScreenFit", page_icon="👁️", layout="wide")
 for _m, _n in ((bank, "make_item"), (llm, "ask"), (features, "compute"), (report, "build"), (grader, "grade"), (semantic, "warm")):
     if not hasattr(_m, _n): st.error(f"`{_m.__name__}.py` has the wrong content (missing `{_n}`). Re-copy it from the project zip."); st.stop()
+if export is not None and not hasattr(export, "pdf_bytes"): st.error("`export.py` has the wrong content (missing `pdf_bytes`). Re-copy it from the project zip."); st.stop()
 S = st.session_state
 def get_rtc():
     """STUN by default. On Streamlit Cloud add TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN secrets for a TURN server (more reliable)."""
@@ -32,6 +35,10 @@ NEUTRAL = ("Please read this neutral text silently at your normal pace. Rivers c
 os.makedirs("data/sessions", exist_ok=True)
 S.setdefault("stage", "pre"); S.setdefault("model", llm.MODEL)
 
+QUALS = ["Diploma / HND", "Bachelor's degree", "Master's degree", "PhD", "Other"]
+EYE_CONDS = ["Short-sightedness (myopia)", "Long-sightedness (hyperopia)", "Astigmatism", "Dry eye", "Squint / lazy eye", "Colour-vision deficiency", "Glaucoma", "Cataract", "Other"]
+EYE_EXAMS = ["Within 1 year", "1-2 years ago", "More than 2 years ago", "Never"]
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 def build_steps(items):
     s = [dict(k="setup", dur=SETUP_S), dict(k="calib", dur=9 * CAL_DOT), dict(k="baseline", dur=BASE_S)]
@@ -96,9 +103,30 @@ def finalize(proc):
                 except Exception: grades[futs[f]] = None
                 bar.progress((n + 1) / len(futs), text=f"Grading short answers {n + 1}/{len(futs)}")
         bar.empty()
+    S.meta["capture"] = S.get("capture", "browser")
     S.meta["grader"] = semantic.engine() if S.get("grader", "semantic") == "semantic" else f"LLM {S.model}"
     rep = report.build(S.sid, S.seed, S.meta, S.qs, S.ans, grades, feats, S.get("post", {}))
     json.dump(rep, open(f"data/sessions/{S.sid}.json", "w"), indent=1); S.rep = rep; S.stage = "done"
+
+# ------------------------------------------------------------------ downloads
+@st.cache_data(show_spinner=False, max_entries=8)
+def _pdf(rep_json): return export.pdf_bytes(json.loads(rep_json))
+
+def downloads(rep, key):
+    """PDF report + CSV files for one session (numbers only; no video is ever stored)."""
+    if export is None: st.warning(f"Exports are unavailable: `{_export_err}`. Add `export.py` and `reportlab` (see requirements.txt)."); return
+    sid = rep["sid"]
+    try: pdf = _pdf(json.dumps(rep)); zp = export.zip_bytes(rep, pdf)
+    except Exception as e: st.error(f"Could not build the export files: {type(e).__name__}: {e}"); return
+    st.markdown("**Downloads**")
+    c = st.columns(3)
+    c[0].download_button("⬇ PDF report", pdf, f"screenfit_{sid}.pdf", "application/pdf", key=f"{key}_pdf", type="primary")
+    c[1].download_button("⬇ All CSV files + PDF (ZIP)", zp, f"screenfit_{sid}.zip", "application/zip", key=f"{key}_zip")
+    with st.expander("Individual CSV files"):
+        d = st.columns(5)
+        for col, (lab, fn, df) in zip(d, [("Summary CSV", "summary", export.summary_df([rep])), ("Questions CSV", "questions", export.questions_df(rep)), ("Eye by paragraph CSV", "eye_by_paragraph", export.paragraph_df(rep)),
+                                          ("EAR series CSV", "ear_series", export.ear_df(rep)), ("Blink events CSV", "blink_events", export.events_df(rep))]):
+            col.download_button("⬇ " + lab, export.csv_bytes(df), f"{fn}_{sid}.csv", "text/csv", key=f"{key}_{fn}")
 
 # ------------------------------------------------------------------ candidate
 def candidate():
@@ -106,18 +134,44 @@ def candidate():
     if S.stage == "pre":
         st.subheader("Pre-session form (not counted in the 20 minutes)")
         with st.form("pre_form"):
-            ok = st.checkbox("I have read the information sheet and agree to take part. My webcam is analysed inside my browser (default) or, if I choose server capture, in memory on the server; video is never recorded or stored (only eye-measurement numbers such as EAR and blink counts are kept); this is not a medical diagnosis; I may withdraw at any time.")
+            ok = st.checkbox("I have read the information sheet and agree to take part. My webcam is analysed inside my browser (default) or, if I choose server capture, in memory on the server; video is never recorded or stored (only eye-measurement numbers such as EAR and blink counts are kept); this is not a medical diagnosis; I may withdraw at any time. The optional health details below are used only to interpret the eye measurements and appear in the report.")
+            st.markdown("**1 · About you**")
             c1, c2, c3 = st.columns(3)
-            level = c1.selectbox("Role level", ["Junior", "Mid-level", "Senior"]); glasses = c2.checkbox("I wear glasses"); hrs = c3.number_input("Screen hours per day", 0.0, 16.0, 8.0, 0.5)
+            name = c1.text_input("Full name (or participant ID) *"); email = c2.text_input("Email (optional)"); phone = c3.text_input("Phone (optional)")
+            c1, c2, c3 = st.columns(3)
+            age = c1.number_input("Age", 16, 80, 25); gender = c2.selectbox("Gender", ["Prefer not to say", "Female", "Male", "Non-binary", "Other"]); qual = c3.selectbox("Highest qualification", QUALS, index=1)
+            c1, c2 = st.columns(2)
+            field = c1.text_input("Field of study (e.g. Computer Science)"); inst = c2.text_input("Institution (university / college)")
+            st.markdown("**2 · Work and skills**")
+            c1, c2, c3 = st.columns(3)
+            exp = c1.number_input("Years of experience", 0.0, 50.0, 0.0, 0.5); job = c2.text_input("Current / most recent job title"); level = c3.selectbox("Role level applied for", ["Junior", "Mid-level", "Senior"])
+            c1, c2 = st.columns(2)
+            skills = c1.text_input("Main programming languages / skills"); certs = c2.text_input("Certifications (optional)")
+            st.markdown("**3 · Eyes and screen use (optional, used only to interpret the eye measurements)**")
+            c1, c2, c3 = st.columns(3)
+            glasses = c1.checkbox("I wear glasses"); lenses = c2.checkbox("I wear contact lenses"); eye_exam = c3.selectbox("Last eye examination", EYE_EXAMS)
+            conds = st.multiselect("Eye conditions (select any that apply)", EYE_CONDS)
+            c1, c2 = st.columns(2)
+            other_med = c1.text_input("Other medical conditions (optional)"); meds = c2.text_input("Medication affecting vision or alertness (optional)")
+            c1, c2 = st.columns(2)
+            sleep = c1.number_input("Hours slept last night", 0.0, 16.0, 7.0, 0.5); hrs = c2.number_input("Screen hours per day", 0.0, 16.0, 8.0, 0.5)
             st.markdown("Complete the official **CVS-Q** and **OSDI** questionnaires and enter your total scores:")
             c1, c2 = st.columns(2); cvsq = c1.number_input("CVS-Q total score", 0, 100, 0); osdi = c2.number_input("OSDI total score (0-100)", 0.0, 100.0, 0.0, 1.0)
             go = st.form_submit_button("Continue to camera check", type="primary")
         if go:
+            errs = []
+            if not ok: errs.append("Consent is required.")
+            if not name.strip(): errs.append("Please enter your name (or a participant ID).")
+            if email.strip() and not EMAIL_RE.match(email.strip()): errs.append("Please enter a valid email address (or leave it empty).")
+            for e in errs: st.error(e)
+            if errs: return
             b = bank.load()
             try: seed = random.randrange(2**31); items = bank.assemble(b, seed)
             except Exception as e: st.error(f"Item bank not ready: {e}. Use the 'Item bank (admin)' page first."); return
-            if not ok: st.error("Consent is required."); return
-            S.update(meta=dict(level=level, glasses=glasses, screen_hours=hrs, cvsq=cvsq, osdi=osdi), qs=items, seed=seed, sid=uuid.uuid4().hex[:8], stage="camera"); st.rerun()
+            meta = dict(name=name.strip(), age=age, gender=gender, email=email.strip(), phone=phone.strip(), qualification=qual, field=field.strip(), institution=inst.strip(),
+                        experience_years=exp, job_title=job.strip(), level=level, skills=skills.strip(), certifications=certs.strip(), glasses=glasses, lenses=lenses,
+                        eye_conditions=list(conds), last_eye_exam=eye_exam, other_medical=other_med.strip(), medications=meds.strip(), sleep_hours=sleep, screen_hours=hrs, cvsq=cvsq, osdi=osdi)
+            S.update(meta=meta, qs=items, seed=seed, sid=uuid.uuid4().hex[:8], stage="camera"); st.rerun()
     elif S.stage == "camera":
         if S.get("grader", "semantic") == "llm" and not llm.ready(): st.error("The selected LLM needs an API key. Open **Model setup** (or switch to the free grader)."); return
         st.caption("Short-answer grader: " + ("free semantic grader (loaded after the interview)" if S.get("grader", "semantic") == "semantic" else f"LLM · {llm.CFG['provider']}"))
@@ -139,7 +193,7 @@ def candidate():
         if not wrap: st_autorefresh(4000 if browser else 1000, key="tick")      # the browser camera already ticks every second; this is only a safety net
         run(proc)
     else:
-        st.success("Interview complete. Thank you!"); report.render(S.rep, candidate=True)
+        st.success("Interview complete. Thank you!"); downloads(S.rep, "cand"); report.render(S.rep, candidate=True)
         if st.button("Start a new session"):
             for k in ["qs", "steps", "ans", "jobs", "pending", "eye", "rep", "post", "meta"]: S.pop(k, None)
             S.stage = "pre"; st.rerun()
@@ -273,7 +327,7 @@ def recruiter():
     st.title("📊 Recruiter dashboard")
     reps = [json.load(open(f)) for f in sorted(glob.glob("data/sessions/*.json"))]
     if not reps: st.info("No completed sessions yet."); return
-    tab = pd.DataFrame([dict(session=r["sid"], when=r["when"], level=r["meta"].get("level"), score=round(r["technical"]["overall"]), risk=r["visual"]["risk"],
+    tab = pd.DataFrame([dict(session=r["sid"], name=r["meta"].get("name"), when=r["when"], level=r["meta"].get("level"), score=round(r["technical"]["overall"]), risk=r["visual"]["risk"],
                              face_ok=(r["visual"].get("quality") or {}).get("face_ok")) for r in reps])
     c = st.columns(4); c[0].metric("Sessions", len(tab)); c[1].metric("Mean technical score", f"{tab.score.mean():.0f}")
     c[2].metric("Moderate/high visual risk", int((tab.risk != "Low").sum())); c[3].metric("Mean face detected", f"{tab.face_ok.mean():.0f}%" if tab.face_ok.notna().any() else "n/a")
@@ -281,7 +335,14 @@ def recruiter():
     b.subheader("Visual-risk levels (shown for context; never used to rank)"); b.bar_chart(tab.risk.value_counts())
     st.dataframe(tab, hide_index=True, use_container_width=True)
     sel = st.selectbox("Open candidate session", tab.session); rep = next(r for r in reps if r["sid"] == sel)
-    st.download_button("⬇ Download this session (JSON)", json.dumps(rep, indent=1), f"{sel}.json", "application/json"); st.divider(); report.render(rep)
+    if export is not None:
+        try: allsum = export.summary_df(reps); allq = pd.concat([export.questions_df(r) for r in reps], ignore_index=True)
+        except Exception as e: st.error(f"Could not build the cohort exports: {type(e).__name__}: {e}")
+        else:
+            c1, c2, _ = st.columns([1, 1, 2])
+            c1.download_button("⬇ All candidates (summary CSV)", export.csv_bytes(allsum), "screenfit_all_candidates.csv", "text/csv", key="all_sum")
+            c2.download_button("⬇ All answers (CSV)", export.csv_bytes(allq), "screenfit_all_answers.csv", "text/csv", key="all_q")
+    downloads(rep, f"rec_{sel}"); st.download_button("⬇ Download this session (JSON)", json.dumps(rep, indent=1), f"{sel}.json", "application/json", key="rec_json"); st.divider(); report.render(rep)
 
 mode = st.sidebar.radio("Mode", ["Candidate interview", "Item bank (admin)", "Recruiter dashboard", "Model setup"])
 if S.stage != "run": st.sidebar.caption("Grader: " + ("free semantic (no key)" if S.get("grader", "semantic") == "semantic" else f"LLM · {S.model}"))
